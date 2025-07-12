@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+remote_setup_script.py
+
+# Generated proxy configurations
+generated_proxies.txt
+generated_proxy_configs/
