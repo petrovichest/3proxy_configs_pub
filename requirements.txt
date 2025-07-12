@@ -1,3 +1,4 @@
 aiohttp
 tqdm
 python-dotenv
+paramiko
