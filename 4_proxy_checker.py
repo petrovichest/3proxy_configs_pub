@@ -8,7 +8,7 @@ from tqdm.asyncio import tqdm
 
 # Определение базовой директории для сгенерированных прокси
 BASE_PROXY_CONFIGS_DIR = "generated_proxy_configs"
-DEFAULT_CONCURRENCY = 50
+DEFAULT_CONCURRENCY = 20
 DEFAULT_OUTPUT_FILENAME = "proxy_check_results.txt"
 CHECK_URL = "http://ifconfig.me/ip"
 
