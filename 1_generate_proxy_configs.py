@@ -266,19 +266,47 @@ echo "Настройка сети IPv6 завершена."
             print(f"Предупреждение: Достигнут конец диапазона портов ({DEFAULT_START_PORT}-{DEFAULT_END_PORT}). Сгенерировано {generated_count} прокси из {num_proxies}.")
             break
 
+        # Определяем IPv6-адрес в зависимости от prefixlen
+        bind_ipv6_prefixlen = 64 # Для привязки всегда используем /64
         if ipv6_network.prefixlen == 48:
-            # Для /48 подсети, инкрементируем четвертый хекстет, как это было ранее
-            hextet_str = format(current_ipv6_suffix_increment, '04x')
-            # Получаем первые 48 бит, затем добавляем новый хекстет и '::' для последних 64 бит
-            base_address_parts = ipv6_network.exploded.split(':')[:3]
-            ipv6_address = f"{':'.join(base_address_parts)}:{hextet_str}"
+            # Для /48 подсети, инкрементируем префикс /64.
+            # current_ipv6_suffix_increment будет определять четвертый хекстет.
+            # Например, если network_address = 2a12:5940:dfaa::/48
+            # и current_ipv6_suffix_increment = 0x0001,
+            # мы хотим получить 2a12:5940:dfaa:0001::, а затем добавить ::2
             
+            # Получаем первые 48 бит (3 хекстета)
+            base_address_parts = ipv6_network.exploded.split(':')[:3]
+            
+            # Формируем новую /64 подсеть
+            # Избегаем создания прямой строки адреса для network_address_with_new_hextet,
+            # вместо этого работаем с целыми числами для корректных вычислений.
+            
+            # Преобразуем первые 48 бит в целое число, сдвигаем на 16 бит влево (чтобы освободить место для 4-го хекстета)
+            # Затем добавляем инкремент и сдвигаем на 64 бита влево (чтобы сформировать префикс /64)
+            # После этого добавляем 2 для final_address_int в конце
+            
+            # network_address_int = int(ipaddress.IPv6Address(':'.join(base_address_parts) + '::'))
+            # new_64_bit_prefix_int = network_address_int | (current_ipv6_suffix_increment << (128 - 64))
+            
+            # Более простой и правильный способ - формируем подсеть /64 и берем из неё адрес
+            # Используем ipaddress.IPv6Network для правильного формирования /64 из /48
+            new_subnet_str = f"{':'.join(base_address_parts)}:{format(current_ipv6_suffix_increment, 'x')}::{bind_ipv6_prefixlen}"
+            try:
+                new_64_subnet = ipaddress.IPv6Network(new_subnet_str, strict=False)
+                # Берем, например, 2-й адрес в этой /64 подсети (::2) для прокси
+                final_address_int = int(new_64_subnet.network_address) + 2
+                ipv6_address = str(ipaddress.IPv6Address(final_address_int))
+            except ipaddress.AddressValueError as e:
+                print(f"Ошибка при формировании /64 подсети из /48 '{new_subnet_str}': {e}", file=sys.stderr)
+                sys.exit(1)
+
         elif ipv6_network.prefixlen == 64:
             # Для /64 подсети, инкрементируем последние 64 бита (последний суффикс)
             # Прибавляем current_ipv6_suffix_increment к числовому представлению адреса сети
             # и получаем новый адрес.
             # Например, для 2a03:a03:c4:d::/64 и increment=1, хотим 2a03:a03:c4:d::1
-            new_address_int = int(ipv6_network.network_address) + (current_ipv6_suffix_increment << 48) + 2
+            new_address_int = int(ipv6_network.network_address) + (current_ipv6_suffix_increment << 48) + 2 # Тут было +2, оставил как было
             ipv6_address = str(ipaddress.IPv6Address(new_address_int))
         else:
             print(f"Ошибка: Неподдерживаемая длина префикса IPv6: {ipv6_network.prefixlen}. Поддерживаются только /48 и /64.", file=sys.stderr)
@@ -292,8 +320,9 @@ echo "Настройка сети IPv6 завершена."
         proxy_lines.append(proxy_line)
 
         # Данные для файла с учетными данными
+        # Сохраняем полный адрес с длиной префикса для корректной привязки
         credentials_list.append(
-            f"user:{proxy_username} pass:{proxy_password} proxy_ip:{external_ipv4} proxy_port:{current_port} ipv6:{ipv6_address}"
+            f"user:{proxy_username} pass:{proxy_password} proxy_ip:{external_ipv4} proxy_port:{current_port} ipv6:{ipv6_address}/{bind_ipv6_prefixlen}"
         )
 
         current_port += 1

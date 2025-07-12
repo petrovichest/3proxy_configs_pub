@@ -21,26 +21,26 @@ def extract_ipv6_addresses(file_path):
     Ожидаемый формат строки: user:xxx pass:yyy proxy_ip:zzz proxy_port:ppp ipv6:AAAA:BBBB:CCCC:DDDD::N
     """
     ipv6_addresses = []
-    ipv6_pattern = re.compile(r"ipv6:([0-9a-fA-F:]+)") # Захватываем полный IPv6-адрес
+    # Изменяем паттерн для захвата полного IPv6-адреса с префиксом
+    ipv6_addr_with_prefix_pattern = re.compile(r"ipv6:([0-9a-fA-F:]+/\d{1,3})")
     try:
         with open(file_path, 'r') as f:
             for line in f:
-                match = ipv6_pattern.search(line)
+                match = ipv6_addr_with_prefix_pattern.search(line)
                 if match:
-                    ipv6_addresses.append(match.group(1)) # Теперь группа 1 содержит нужный префикс
+                    ipv6_addresses.append(match.group(1)) # Теперь группа 1 содержит полный адрес с префиксом
     except FileNotFoundError:
         print(f"Ошибка: Файл не найден по пути {file_path}")
     return ipv6_addresses
 
-def get_ipv6_command(ipv6_address, interface, action):
+def get_ipv6_command(ipv6_address_with_prefix, interface, action):
     """
     Возвращает строку команды для добавления или удаления IPv6-адреса.
     action: 'add' или 'del'
     """
-    # Добавляем /64, так как 3proxy обычно использует /64 подсети, даже для отдельных IP
-    # Более того, ip addr add требует CIDR
+    # Используем извлеченный IPv6-адрес, который уже содержит префикс
     # Команды будут выполняться через sudo, поэтому 'sudo' здесь не добавляем.
-    return f"ip -6 addr {action} {ipv6_address}/64 dev {interface}"
+    return f"ip -6 addr {action} {ipv6_address_with_prefix} dev {interface}"
 
 def get_default_ipv6_interface():
     """

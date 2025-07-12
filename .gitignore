@@ -210,3 +210,4 @@ remote_setup_script.py
 # Generated proxy configurations
 generated_proxies.txt
 generated_proxy_configs/
+downloaded_configs/
