@@ -363,7 +363,9 @@ echo "Enabling and starting service 3proxy-{project_name}..."
 sudo systemctl enable --now 3proxy-{project_name}.service
 
 echo "Status of service 3proxy-{project_name}:"
-sudo systemctl status 3proxy-{project_name}.service
+echo "Проверка статуса сервиса 3proxy-{project_name}:"
+sudo systemctl is-active --quiet 3proxy-{project_name}.service && echo "Сервис активен." || echo "Сервис не активен."
+sudo systemctl is-enabled --quiet 3proxy-{project_name}.service && echo "Сервис включен в автозагрузку." || echo "Сервис не включен в автозагрузку."
 """
 
     # Записываем start_systemctl.sh скрипт
