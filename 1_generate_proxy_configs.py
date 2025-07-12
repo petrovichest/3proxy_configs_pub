@@ -56,24 +56,18 @@ def save_state(state):
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=4)
 
-def get_external_ipv4():
-    """
-    Пытается определить внешний IPv4-адрес сервера.
-    Использует curl и ifconfig.me.
-    """
-    try:
-        # Попытка получить внешний IP с ifconfig.me
-        result = subprocess.run(['curl', '-s', 'ifconfig.me'], capture_output=True, text=True, check=True)
-        ipv4 = result.stdout.strip()
-        if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ipv4):
-            raise ValueError(f"Некорректный формат IPv4: {ipv4}")
-        print(f"Определен внешний IPv4: {ipv4}")
-        return ipv4
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError) as e:
-        print(f"Ошибка при определении внешнего IPv4: {e}")
-        print("Попробуйте установить 'curl' (например, 'sudo apt-get install curl' или 'sudo yum install curl').")
-        print("Не удалось определить внешний IPv4-адрес. Пожалуйста, укажите его вручную или убедитесь, что curl установлен и работает.")
-        sys.exit(1) # Завершаем работу, так как внешний IP не определен
+def validate_ipv4(ipv4_address):
+    """Проверяет, является ли строка корректным IPv4-адресом."""
+    pattern = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+    if not pattern.match(ipv4_address):
+        raise ValueError(f"Некорректный формат IPv4: {ipv4_address}")
+    # Проверка на диапазоны октетов (0-255)
+    for part in ipv4_address.split('.'):
+        if not 0 <= int(part) <= 255:
+            raise ValueError(f"Некорректный октет IPv4: {part}")
+    return True
+
+# Функция get_external_ipv4 удалена, т.к. IPv4 будет передаваться аргументом
 
 def check_and_add_ipv6_default_route(ipv6_subnet, interface):
     """
@@ -172,6 +166,7 @@ def generate_proxy_configs(
     project_name,
     ipv6_subnet,
     interface,
+    external_ipv4, # Добавляем внешний IPv4 как аргумент
 ):
     """
     Генерирует конфигурации прокси для указанного проекта.
@@ -189,8 +184,7 @@ def generate_proxy_configs(
     os.makedirs(session_output_dir, exist_ok=True) # This still needs to ensure the base project directory exists
 
     state = get_state()
-    external_ipv4 = get_external_ipv4() # Получаем внешний IPv4 динамически
-    # Заменяем автоматическое определение на переданную подсеть
+    # external_ipv4 теперь передается как аргумент, автоматическое определение удалено
     try:
         ipv6_network = ipaddress.IPv6Network(ipv6_subnet, strict=True)
     except ipaddress.AddressValueError as e:
@@ -536,6 +530,12 @@ if __name__ == "__main__":
         help="Сетевой интерфейс для привязки (например, ens3 или eth0).",
         default=None # По умолчанию None, чтобы можно было запросить интерактивно
     )
+    parser.add_argument(
+        "--external-ipv4",
+        type=str,
+        help="Внешний IPv4-адрес сервера (например, 192.168.1.1).",
+        default=None # По умолчанию None, чтобы можно было запросить интерактивно
+    )
     args = parser.parse_args()
 
     # Проверяем, предоставлены ли аргументы через командную строку, иначе запрашиваем
@@ -543,6 +543,7 @@ if __name__ == "__main__":
     project_name_input = args.project_name
     ipv6_subnet_input = args.ipv6_subnet
     interface_input = args.interface
+    external_ipv4_input = args.external_ipv4
 
     # Если количество прокси не было предоставлено, запрашиваем у пользователя
     while num_proxies_input is None:
@@ -573,6 +574,16 @@ if __name__ == "__main__":
         interface_input = input("Пожалуйста, введите сетевой интерфейс для привязки (например, ens3 или eth0): ")
         if not interface_input.strip():
             print("Сетевой интерфейс не может быть пустым.", file=sys.stderr)
+    
+    # Если внешний IPv4 не был предоставлен, запрашиваем у пользователя
+    while external_ipv4_input is None:
+        try:
+            input_ipv4 = input("Пожалуйста, введите внешний IPv4-адрес сервера: ")
+            validate_ipv4(input_ipv4) # Проверяем формат
+            external_ipv4_input = input_ipv4
+        except ValueError as e:
+            print(f"Ошибка ввода IPv4: {e}. Пожалуйста, введите корректный IPv4-адрес.", file=sys.stderr)
+            external_ipv4_input = None # Сбросить, чтобы запросить снова
 
     # Убедимся, что базовая директория для генерируемых конфигов существует
     os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
@@ -581,5 +592,6 @@ if __name__ == "__main__":
         num_proxies=num_proxies_input,
         project_name=project_name_input,
         ipv6_subnet=ipv6_subnet_input,
-        interface=interface_input
+        interface=interface_input,
+        external_ipv4=external_ipv4_input # Передаем внешний IPv4
     )
