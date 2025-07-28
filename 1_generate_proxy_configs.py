@@ -257,9 +257,9 @@ echo "Настройка сети IPv6 завершена."
     proxy_lines = []
     credentials_list = []
 
-    # Generate random username and password for the entire batch
+    # Use project name as both username and password
     proxy_username = project_name
-    proxy_password = generate_random_string(12)
+    proxy_password = project_name
 
     for i in range(num_proxies):
         if current_port > DEFAULT_END_PORT:
