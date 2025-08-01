@@ -147,17 +147,25 @@ if __name__ == "__main__":
     print("\n--- Введите параметры для генерации прокси ---")
     num_proxies_input = ""
     while not num_proxies_input.isdigit() or int(num_proxies_input) <= 0:
-        num_proxies_input = input("Количество прокси для генерации (целое положительное число): ")
+        num_proxies_input = input("Количество прокси для генерации в каждой пачке (целое положительное число): ")
         if not num_proxies_input.isdigit() or int(num_proxies_input) <= 0:
             print("Некорректный ввод. Пожалуйста, введите целое положительное число.")
     num_proxies_input = int(num_proxies_input)
 
-    project_name_input = ""
-    while not project_name_input.strip():
-        project_name_input = input("Имя проекта: ")
-        if not project_name_input.strip():
+    base_project_name_input = ""
+    while not base_project_name_input.strip():
+        base_project_name_input = input("Базовое имя проекта (будет добавлен номер пачки, например: proxy_1, proxy_2): ")
+        if not base_project_name_input.strip():
             print("Имя проекта не может быть пустым.")
     
+    # --- НОВЫЙ ЗАПРОС: КОЛИЧЕСТВО ПАЧЕК ---
+    num_batches_input = ""
+    while not num_batches_input.isdigit() or int(num_batches_input) <= 0 or int(num_batches_input) > 10:
+        num_batches_input = input("Сколько пачек прокси создать? (1-10, по умолчанию: 1): ") or "1"
+        if not num_batches_input.isdigit() or int(num_batches_input) <= 0 or int(num_batches_input) > 10:
+            print("Некорректный ввод. Пожалуйста, введите число от 1 до 10.")
+    num_batches = int(num_batches_input)
+
     ipv6_subnet_input = ""
     while not ipv6_subnet_input.strip():
         ipv6_subnet_input = input("IPv6 подсеть (например, 2a03:a03:a03::/48 или 2a03:a03:a03:a03::/64): ")
@@ -172,15 +180,6 @@ if __name__ == "__main__":
 
     external_ipv4_input = REMOTE_HOST
     print(f"Внешний IPv4-адрес сервера: {external_ipv4_input} (взято из REMOTE_HOST)")
-
-    # Формируем аргументы для run_generator.sh
-    generator_params_for_script = (
-        f"{num_proxies_input} "
-        f"{project_name_input} "
-        f"--ipv6-subnet {ipv6_subnet_input} "
-        f"--interface {interface_input} "
-        f"--external-ipv4 {external_ipv4_input}"
-    )
 
     # --- ВЫПОЛНЕНИЕ ПОСЛЕДОВАТЕЛЬНОСТИ УСТАНОВКИ И ЗАПУСКА ---
     print("\n--- Выполнение последовательности установки и запуска ---")
@@ -273,84 +272,102 @@ if __name__ == "__main__":
         print("Ошибка при запуске install_all.sh. Проверьте stderr выше.")
         sys.exit(1)
     
-    # Запуск run_generator.sh
-    print(f"\n--- Запуск run_generator.sh в {ACTUAL_CLONE_DIR} с параметрами: {generator_params_for_script} ---")
-    run_command = f"cd {ACTUAL_CLONE_DIR} && sudo bash run_generator.sh {generator_params_for_script}"
-    stdout, stderr = run_remote_command(
-        hostname=REMOTE_HOST,
-        username=REMOTE_USER,
-        password=AUTH_PASSWORD,
-        key_filepath=AUTH_KEY_FILEPATH,
-        command=run_command,
-        sudo_password=SUDO_PASSWORD
-    )
-    if stderr:
-        print("Ошибка при запуске run_generator.sh. Проверьте stderr выше.")
-        sys.exit(1)
+    # --- НОВАЯ ЛОГИКА: СОЗДАНИЕ НЕСКОЛЬКИХ ПАЧЕК ПРОКСИ ---
+    print(f"\n--- Создание {num_batches} пачек прокси ---")
     
-    # Скачивание extracted_proxy
-    print(f"\n--- Скачивание extracted_proxy ---")
-    extracted_proxy_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{project_name_input}/extracted_proxy")
-    local_output_dir = "downloaded_configs"
-    os.makedirs(local_output_dir, exist_ok=True)
-    extracted_proxy_local_path = os.path.join(local_output_dir, f"{project_name_input}")
+    for batch_num in range(1, num_batches + 1):
+        current_project_name = f"{base_project_name_input}_{batch_num}"
+        print(f"\n--- Создание пачки {batch_num}/{num_batches}: {current_project_name} ---")
+        
+        # Формируем аргументы для run_generator.sh
+        generator_params_for_script = (
+            f"{num_proxies_input} "
+            f"{current_project_name} "
+            f"--ipv6-subnet {ipv6_subnet_input} "
+            f"--interface {interface_input} "
+            f"--external-ipv4 {external_ipv4_input}"
+        )
+        
+        # Запуск run_generator.sh для текущей пачки
+        print(f"\n--- Запуск run_generator.sh для {current_project_name} ---")
+        run_command = f"cd {ACTUAL_CLONE_DIR} && sudo bash run_generator.sh {generator_params_for_script}"
+        stdout, stderr = run_remote_command(
+            hostname=REMOTE_HOST,
+            username=REMOTE_USER,
+            password=AUTH_PASSWORD,
+            key_filepath=AUTH_KEY_FILEPATH,
+            command=run_command,
+            sudo_password=SUDO_PASSWORD
+        )
+        if stderr:
+            print(f"Ошибка при запуске run_generator.sh для {current_project_name}. Продолжаем со следующей пачкой.")
+            continue
+        
+        # Скачивание extracted_proxy для текущей пачки
+        print(f"\n--- Скачивание extracted_proxy для {current_project_name} ---")
+        extracted_proxy_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{current_project_name}/extracted_proxy")
+        local_output_dir = "downloaded_configs"
+        batch_output_dir = os.path.join(local_output_dir, current_project_name)
+        os.makedirs(batch_output_dir, exist_ok=True)
+        extracted_proxy_local_path = os.path.join(batch_output_dir, "extracted_proxy")
 
-    download_file_sftp(
-        hostname=REMOTE_HOST,
-        username=REMOTE_USER,
-        password=AUTH_PASSWORD,
-        key_filepath=AUTH_KEY_FILEPATH,
-        remote_path=extracted_proxy_remote_path,
-        local_path=extracted_proxy_local_path
-    )
+        download_file_sftp(
+            hostname=REMOTE_HOST,
+            username=REMOTE_USER,
+            password=AUTH_PASSWORD,
+            key_filepath=AUTH_KEY_FILEPATH,
+            remote_path=extracted_proxy_remote_path,
+            local_path=extracted_proxy_local_path
+        )
 
-    # Выполнение start_systemctl.sh
-    print(f"\n--- Запуск start_systemctl.sh ---")
-    start_systemctl_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{project_name_input}/start_systemctl.sh")
-    start_systemctl_dir = os.path.dirname(start_systemctl_remote_path)
-    start_systemctl_name = os.path.basename(start_systemctl_remote_path)
-    stdout, stderr = run_remote_command(
-        hostname=REMOTE_HOST,
-        username=REMOTE_USER,
-        password=AUTH_PASSWORD,
-        key_filepath=AUTH_KEY_FILEPATH,
-        command=f"cd {start_systemctl_dir} && sudo bash {start_systemctl_name}",
-        sudo_password=SUDO_PASSWORD
-    )
-    if stderr:
-        print("Ошибка при запуске start_systemctl.sh. Проверьте stderr выше.")
-        sys.exit(1)
+        # Выполнение start_systemctl.sh для текущей пачки
+        print(f"\n--- Запуск start_systemctl.sh для {current_project_name} ---")
+        start_systemctl_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{current_project_name}/start_systemctl.sh")
+        start_systemctl_dir = os.path.dirname(start_systemctl_remote_path)
+        start_systemctl_name = os.path.basename(start_systemctl_remote_path)
+        stdout, stderr = run_remote_command(
+            hostname=REMOTE_HOST,
+            username=REMOTE_USER,
+            password=AUTH_PASSWORD,
+            key_filepath=AUTH_KEY_FILEPATH,
+            command=f"cd {start_systemctl_dir} && sudo bash {start_systemctl_name}",
+            sudo_password=SUDO_PASSWORD
+        )
+        if stderr:
+            print(f"Ошибка при запуске start_systemctl.sh для {current_project_name}. Продолжаем со следующей пачкой.")
+            continue
 
-    # Выполнение proxy_checker.sh для генерации файла результатов
-    print(f"\n--- Запуск proxy_checker.sh для генерации файла результатов ---")
-    proxy_checker_script_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{project_name_input}/proxy_checker.sh")
-    proxy_checker_dir = os.path.dirname(proxy_checker_script_remote_path)
-    proxy_checker_name = os.path.basename(proxy_checker_script_remote_path)
-    stdout_checker_run, stderr_checker_run = run_remote_command(
-        hostname=REMOTE_HOST,
-        username=REMOTE_USER,
-        password=AUTH_PASSWORD,
-        key_filepath=AUTH_KEY_FILEPATH,
-        command=f"cd {proxy_checker_dir} && bash {proxy_checker_name}",
-        sudo_password=SUDO_PASSWORD
-    )
+        # Выполнение proxy_checker.sh для генерации файла результатов
+        print(f"\n--- Запуск proxy_checker.sh для {current_project_name} ---")
+        proxy_checker_script_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{current_project_name}/proxy_checker.sh")
+        proxy_checker_dir = os.path.dirname(proxy_checker_script_remote_path)
+        proxy_checker_name = os.path.basename(proxy_checker_script_remote_path)
+        stdout_checker_run, stderr_checker_run = run_remote_command(
+            hostname=REMOTE_HOST,
+            username=REMOTE_USER,
+            password=AUTH_PASSWORD,
+            key_filepath=AUTH_KEY_FILEPATH,
+            command=f"cd {proxy_checker_dir} && bash {proxy_checker_name}",
+            sudo_password=SUDO_PASSWORD
+        )
 
-    if stderr_checker_run:
-        print("Ошибка при запуске proxy_checker.sh. Проверьте stderr выше.")
-        sys.exit(1)
+        if stderr_checker_run:
+            print(f"Ошибка при запуске proxy_checker.sh для {current_project_name}. Продолжаем со следующей пачкой.")
+            continue
+        
+        # Скачиваем файл proxy_check_results.txt для текущей пачки
+        print(f"\n--- Скачивание proxy_check_results.txt для {current_project_name} ---")
+        proxy_results_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{current_project_name}/proxy_check_results.txt")
+        proxy_results_local_path = os.path.join(batch_output_dir, "proxy_check_results.txt")
+
+        download_file_sftp(
+            hostname=REMOTE_HOST,
+            username=REMOTE_USER,
+            password=AUTH_PASSWORD,
+            key_filepath=AUTH_KEY_FILEPATH,
+            remote_path=proxy_results_remote_path,
+            local_path=proxy_results_local_path
+        )
+        print(f"Результаты проверки прокси для {current_project_name} сохранены в: {proxy_results_local_path}")
     
-    # Скачиваем файл proxy_check_results.txt
-    print(f"\n--- Скачивание proxy_check_results.txt ---")
-    proxy_results_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{project_name_input}/proxy_check_results.txt")
-    proxy_results_local_path = os.path.join(local_output_dir, f"{project_name_input}_proxy_check_results.txt")
-
-    download_file_sftp(
-        hostname=REMOTE_HOST,
-        username=REMOTE_USER,
-        password=AUTH_PASSWORD,
-        key_filepath=AUTH_KEY_FILEPATH,
-        remote_path=proxy_results_remote_path,
-        local_path=proxy_results_local_path
-    )
-    print(f"Результаты проверки прокси сохранены в: {proxy_results_local_path}")
-    
+    print(f"\n--- Все пачки обработаны. Результаты сохранены в папке: {local_output_dir} ---")
