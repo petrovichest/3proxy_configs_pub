@@ -275,6 +275,13 @@ if __name__ == "__main__":
     # --- НОВАЯ ЛОГИКА: СОЗДАНИЕ НЕСКОЛЬКИХ ПАЧЕК ПРОКСИ ---
     print(f"\n--- Создание {num_batches} пачек прокси ---")
     
+    project_name = base_project_name_input
+    local_output_dir = "downloaded_configs"
+    project_output_dir = os.path.join(local_output_dir, project_name)
+    
+    # Создаем корневую папку проекта
+    os.makedirs(project_output_dir, exist_ok=True)
+    
     for batch_num in range(1, num_batches + 1):
         current_project_name = f"{base_project_name_input}_{batch_num}"
         print(f"\n--- Создание пачки {batch_num}/{num_batches}: {current_project_name} ---")
@@ -306,8 +313,7 @@ if __name__ == "__main__":
         # Скачивание extracted_proxy для текущей пачки
         print(f"\n--- Скачивание extracted_proxy для {current_project_name} ---")
         extracted_proxy_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{current_project_name}/extracted_proxy")
-        local_output_dir = "downloaded_configs"
-        batch_output_dir = os.path.join(local_output_dir, current_project_name)
+        batch_output_dir = os.path.join(project_output_dir, current_project_name)
         os.makedirs(batch_output_dir, exist_ok=True)
         extracted_proxy_local_path = os.path.join(batch_output_dir, "extracted_proxy")
 
@@ -370,4 +376,4 @@ if __name__ == "__main__":
         )
         print(f"Результаты проверки прокси для {current_project_name} сохранены в: {proxy_results_local_path}")
     
-    print(f"\n--- Все пачки обработаны. Результаты сохранены в папке: {local_output_dir} ---")
+    print(f"\n--- Все пачки обработаны. Результаты сохранены в папке: {project_output_dir} ---")
