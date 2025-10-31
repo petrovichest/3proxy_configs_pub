@@ -29,6 +29,8 @@ setuid 65535
 flush
 auth strong
 users {username}:CL:{password}
+deny * * 0.0.0.0/0
+deny * * ::ffff:0.0.0.0/96
 allow {username}
 """
 
