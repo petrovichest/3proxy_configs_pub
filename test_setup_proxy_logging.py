@@ -1,5 +1,9 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+import setup_proxy_logging
 from setup_proxy_logging import add_logging_to_config
 
 
@@ -26,6 +30,27 @@ class LoggingConfigTests(unittest.TestCase):
             add_logging_to_config("maxconn 10000\n", "../example")
         with self.assertRaises(ValueError):
             add_logging_to_config(add_logging_to_config("maxconn 10000\n", "example_1"), "example_2")
+
+    def test_installs_log_file_and_rotation_units(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            log_dir = root / "logs"
+            with (
+                patch.object(setup_proxy_logging, "LOG_DIR", log_dir),
+                patch.object(setup_proxy_logging, "LOGROTATE_CONFIG", root / "logrotate.conf"),
+                patch.object(setup_proxy_logging, "ROTATE_SERVICE", root / "3proxy-logrotate.service"),
+                patch.object(setup_proxy_logging, "ROTATE_TIMER", root / "3proxy-logrotate.timer"),
+                patch.object(setup_proxy_logging.os, "geteuid", return_value=0),
+                patch.object(setup_proxy_logging.os, "chown") as chown,
+                patch.object(setup_proxy_logging.shutil, "which", return_value="/usr/sbin/logrotate"),
+                patch.object(setup_proxy_logging.subprocess, "run") as run,
+            ):
+                setup_proxy_logging.install_system_logging("example_1")
+                self.assertTrue((log_dir / "example_1.log").is_file())
+                self.assertTrue((root / "logrotate.conf").is_file())
+                self.assertTrue((root / "3proxy-logrotate.timer").is_file())
+                self.assertEqual(chown.call_count, 2)
+                self.assertEqual(run.call_count, 2)
 
 
 if __name__ == "__main__":

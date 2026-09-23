@@ -93,13 +93,13 @@ def install_system_logging(project_name):
     if LOG_DIR.is_symlink():
         raise RuntimeError(f"Refusing symlinked log directory: {LOG_DIR}")
     LOG_DIR.mkdir(mode=0o750, parents=True, exist_ok=True)
-    LOG_DIR.chown(0, 65535)
+    os.chown(LOG_DIR, 0, 65535)
     LOG_DIR.chmod(0o750)
     log_path = LOG_DIR / (project_name + ".log")
     if log_path.is_symlink():
         raise RuntimeError(f"Refusing symlinked log file: {log_path}")
     log_path.touch(exist_ok=True)
-    log_path.chown(65535, 65535)
+    os.chown(log_path, 65535, 65535)
     log_path.chmod(0o600)
 
     write_if_changed(LOGROTATE_CONFIG, LOGROTATE_CONTENT, 0o644)
