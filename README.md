@@ -191,3 +191,42 @@ venv/bin/python 4_proxy_checker.py --project-name capacity_1
 Проверка сравнивает ответ IPv6 API с назначенным адресом, возвращает ненулевой
 код при ошибках и пишет JSONL без паролей в `proxy_check_results.txt`.
 Для небольшой предварительной проверки доступен `--sample 10`.
+
+## Нагрузочные испытания через реальные API
+
+`proxy_load_test.py` запускается отдельно от рабочих парсеров. Нужны окружение
+`jup_async_parser`, соседний checkout `arb_parsers_models` и Node-зависимости его
+Titan-транспорта. Для изолированной установки Node-зависимостей:
+
+```bash
+npm install --prefix capacity_results/node --no-package-lock --ignore-scripts \
+  ws@8.21.3 https-proxy-agent@7.0.6
+```
+
+Пример HTTP-прогона (путь к интерпретатору замените на окружение парсера):
+
+```bash
+/path/to/jup_async_parser/.venv/bin/python proxy_load_test.py \
+  --host 192.0.2.10 --interface net0 --parser-root /path/to/jup_async_parser \
+  --proxy-file downloaded_configs/192.0.2.10/extracted_proxy \
+  --profile http --rps 10 --ramp --output capacity_results/http.jsonl
+```
+
+Для WebSocket: `--profile ws --connections 100 --ramp`. Для совместного прогона:
+`--profile mixed --connections 500 --rps 10 --ramp --ramp-axis http` либо
+`--ramp-axis ws`. По умолчанию используются 60 секунд прогрева и 300 секунд
+измерения на ступень. Ступени возрастают в 1,5 раза; HTTP сохраняет ограничение
+профиля Llama/Base в один запрос в секунду на прокси. Для уточнения границы
+запускайте отдельные ступени без `--ramp`. Для финальной проверки — `--duration 1800`.
+
+HTTP выполняет buy-котировку 200 USDT → ETH на Base через Llama/Kyber;
+WebSocket подписывается на buy-котировки 50 USDT → SOL через Titan.
+Ключ Llama читается из `.env` парсера. Данные и секреты парсеров не записываются
+в отчёт, рабочие процессы и Redis не используются. Повторение одной пары
+характеризует транспорт этого запроса, а не нагрузку всех возможных торговых пар.
+
+На исследуемом сервере через Git должна быть установлена `capacity_monitor.py`.
+Монитор передаёт показатели по одному SSH-соединению каждые пять секунд.
+Результаты и ресурсные измерения сохраняются как JSONL. При 401/403/429,
+ограничении подписок, нехватке ресурсов или ухудшении качества прогон прекращается.
+Предел API и предел генератора не следует считать пределом прокси-сервера.
