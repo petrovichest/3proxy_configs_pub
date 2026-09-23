@@ -215,12 +215,13 @@ def network_preflight(interface, external_ipv4):
 
 def configure_allocator(unit_path, arenas):
     """Opt-in glibc arena limit; a repeated application does not restart a service."""
-    if arenas<=0:
-        raise ValueError('Malloc arena limit must be positive')
+    if arenas<0:
+        raise ValueError('Malloc arena limit cannot be negative')
     current=unit_path.read_text()
     line=f'Environment=MALLOC_ARENA_MAX={arenas}\n'
     updated=re.sub(r'^Environment=MALLOC_ARENA_MAX=\d+\n','',current,flags=re.M)
-    updated=updated.replace('[Service]\n','[Service]\n'+line,1)
+    if arenas:
+        updated=updated.replace('[Service]\n','[Service]\n'+line,1)
     if updated==current:
         return False
     atomic_write(unit_path,updated,0o644)
@@ -238,10 +239,10 @@ def main():
     parser.add_argument('--interface')
     parser.add_argument('--external-ipv4')
     parser.add_argument('--start', action='store_true')
-    parser.add_argument('--malloc-arenas',type=int,help='Opt-in glibc arena limit; restarts only services whose setting changes')
+    parser.add_argument('--malloc-arenas',type=int,help='Opt-in glibc arena limit (0 restores default); restarts changed services')
     args = parser.parse_args()
-    if args.malloc_arenas is not None and (args.malloc_arenas<=0 or not args.start):
-        parser.error('--malloc-arenas requires a positive count and --start')
+    if args.malloc_arenas is not None and (args.malloc_arenas<0 or not args.start):
+        parser.error('--malloc-arenas requires a nonnegative count and --start')
     target = args.target_count is not None
     count = args.target_count if target else args.num_proxies
     if count is None:

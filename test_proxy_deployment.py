@@ -112,6 +112,9 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(unit.read_text().count('MALLOC_ARENA_MAX='),1)
         self.assertIn('Environment=MALLOC_ARENA_MAX=4',unit.read_text())
         self.assertEqual((project/'full_proxy_config').read_bytes(),original)
+        self.assertTrue(gen.configure_allocator(unit,0))
+        self.assertFalse(gen.configure_allocator(unit,0))
+        self.assertNotIn('MALLOC_ARENA_MAX',unit.read_text())
 
 
 class BindingTests(unittest.TestCase):
