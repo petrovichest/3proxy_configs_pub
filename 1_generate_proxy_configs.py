@@ -149,6 +149,8 @@ def generate_proxy_configs(num_proxies, project_name, ipv6_subnet, interface, ex
         state = get_state()
         projects, endpoints, used_addresses = inspect_projects()
         names = ([n for n in projects if re.fullmatch(re.escape(project_name)+r'_\d+', n)] if target else [project_name] if project_name in projects else [])
+        if target:
+            names.sort(key=lambda name:int(name.rsplit('_',1)[1]))
         existing = sum(len(projects[n]) for n in names)
         for n in names:
             if any(r['proxy_ip'] != external_ipv4 or ipaddress.IPv6Interface(r['ipv6']).ip not in network for r in projects[n]):
@@ -156,7 +158,7 @@ def generate_proxy_configs(num_proxies, project_name, ipv6_subnet, interface, ex
         if existing > num_proxies or (existing and not target and existing != num_proxies):
             raise ValueError('Existing proxies are preserved; use a new project or larger target')
         if existing == num_proxies:
-            return sorted(names)
+            return names
         entry = state.setdefault(external_ipv4, {'latest_port': DEFAULT_START_PORT-1, 'ipv6_subnets': {}})
         subnet = entry['ipv6_subnets'].setdefault(str(network), {'latest_suffix_increment': 0})
         port = max(entry['latest_port']+1, max((p+1 for ip,p in endpoints if ip == external_ipv4), default=DEFAULT_START_PORT))
@@ -197,7 +199,7 @@ def generate_proxy_configs(num_proxies, project_name, ipv6_subnet, interface, ex
                 os.rename(temp, BASE_OUTPUT_DIR / name)
             names.append(name)
             print(f'Created {name}: {len(records)} proxies', flush=True)
-        return sorted(names)
+        return names
 
 
 def network_preflight(interface, external_ipv4):

@@ -53,6 +53,12 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.generate(5),names)
         self.assertEqual(gen.STATE_FILE.read_bytes(),state)
 
+    def test_tenth_batch_is_appended_without_reordering_old_batches(self):
+        previous=self.generate(27)
+        grown=self.generate(30)
+        self.assertEqual(grown[:-1],previous)
+        self.assertEqual(grown[-1],'test_10')
+
     def test_corrupt_state_is_not_reset(self):
         self.base.mkdir()
         gen.STATE_FILE.write_text('{broken')
