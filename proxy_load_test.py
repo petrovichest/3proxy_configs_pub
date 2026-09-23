@@ -48,6 +48,32 @@ def process_usage(pid):
             'rss':int(status['VmRSS'].split()[0])*1024}
 
 
+def ws_restriction(decoded):
+    """Inspect control/error fields, never arbitrary transaction bytes or addresses."""
+    controls=[value for key,value in decoded.items() if key!='StreamData']
+    payload=decoded.get('StreamData',{}).get('payload',{})
+    if isinstance(payload,dict):
+        controls.extend(value for key,value in payload.items() if key!='SwapQuotes')
+        swap=payload.get('SwapQuotes',{})
+        if isinstance(swap,dict):
+            controls.extend(value for key,value in swap.items() if key.lower() in ('error','errors'))
+            for quote_data in swap.get('quotes',{}).values():
+                if isinstance(quote_data,dict):
+                    controls.extend(value for key,value in quote_data.items() if key.lower() in ('error','errors'))
+    pattern=r'\b(rate[ _-]?limit(?:ed|ing)?|too[ _-]?many|quota|forbidden|unauthori[sz]ed)\b'
+    while controls:
+        value=controls.pop()
+        if isinstance(value,dict):
+            if any(str(value.get(key,'')) in ('401','403','429') for key in ('code','status','statusCode')):
+                return 'http_status'
+            controls.extend(value.values())
+        elif isinstance(value,list):controls.extend(value)
+        elif isinstance(value,str):
+            match=re.search(pattern,value,re.I)
+            if match:return re.sub(r'[ _-]+','_',match.group(1).lower())
+    return None
+
+
 class Stage:
     def __init__(self,args,proxies,rps,ws_count,baseline=None):
         self.args,self.proxies,self.rps,self.ws_count,self.baseline=args,proxies,rps,ws_count,baseline
@@ -247,7 +273,9 @@ class Stage:
                 message=await asyncio.wait_for(ws.recv(),20)
                 decoded=self.titan.decode_message(message)
                 if decoded:
-                    if re.search(r'rate.?limit|too many|quota|forbidden|unauthori',str(decoded),re.I):
+                    restriction=ws_restriction(decoded)
+                    if restriction:
+                        self.counts['ws_restriction_'+restriction]+=1
                         self.halt('api_ws_restriction');break
                     parsed=self.titan.process_quote_response(decoded,self.titan.INPUT_MINT_SOL)
                     if not parsed.get('error') and int(parsed.get('outAmount',0))>0:

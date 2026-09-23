@@ -2,7 +2,7 @@ import asyncio
 from collections import Counter
 from types import SimpleNamespace
 import unittest
-from proxy_load_test import resource_stop,parse_proxy,percentile,Stage
+from proxy_load_test import resource_stop,parse_proxy,percentile,Stage,ws_restriction
 
 
 class LoadGuardTests(unittest.TestCase):
@@ -26,6 +26,16 @@ class LoadGuardTests(unittest.TestCase):
         proxy=parse_proxy('192.0.2.1:10000@user:a/b')
         self.assertEqual(proxy['endpoint'],'192.0.2.1:10000')
         self.assertIn('a%2Fb',proxy['url'])
+
+    def test_ws_control_restrictions_exclude_quote_transaction_bytes(self):
+        quote={'StreamData':{'payload':{'SwapQuotes':{'quotes':{'Titan':{
+            'outAmount':123,'transaction':b'\x00quota\xff','pool':'AbcQuOtAxyz'}}}}}}
+        self.assertIsNone(ws_restriction(quote))
+        self.assertEqual(ws_restriction({'StreamEnd':{'reason':'Rate limited'}}),'rate_limited')
+        self.assertEqual(ws_restriction({'Error':{'message':'Subscription quota exceeded'}}),'quota')
+        self.assertEqual(ws_restriction({'Error':{'status':429}}),'http_status')
+        quote['StreamData']['payload']['SwapQuotes']['quotes']['Titan']['error']='Too many requests'
+        self.assertEqual(ws_restriction(quote),'too_many')
 
 
 if __name__=='__main__':unittest.main()
