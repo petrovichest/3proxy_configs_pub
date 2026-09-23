@@ -2,7 +2,7 @@ import asyncio
 from collections import Counter
 from types import SimpleNamespace
 import unittest
-from proxy_load_test import resource_stop,parse_proxy,percentile,Stage,ws_restriction
+from proxy_load_test import resource_stop,parse_proxy,percentile,Stage,ws_restriction,valid_ws_quote
 
 
 class LoadGuardTests(unittest.TestCase):
@@ -36,6 +36,17 @@ class LoadGuardTests(unittest.TestCase):
         self.assertEqual(ws_restriction({'Error':{'status':429}}),'http_status')
         quote['StreamData']['payload']['SwapQuotes']['quotes']['Titan']['error']='Too many requests'
         self.assertEqual(ws_restriction(quote),'too_many')
+
+    def test_useful_ws_quote_requires_expected_amount_and_tokens(self):
+        client=SimpleNamespace(INPUT_MINT_USDT='USDT',INPUT_MINT_SOL='SOL',_safe_str=str)
+        row={'inAmount':'50000000','outAmount':'123','inputMint':'USDT','outputMint':'SOL'}
+        message={'StreamData':{'payload':{'SwapQuotes':{'quotes':{'Titan':row}}}}}
+        self.assertTrue(valid_ws_quote(message,client))
+        for key,value in [('outAmount','0'),('inAmount','1'),('outputMint','WRONG'),('error','invalid')]:
+            original=dict(row);row[key]=value
+            self.assertFalse(valid_ws_quote(message,client))
+            row.clear();row.update(original)
+        self.assertFalse(valid_ws_quote({'StreamData':None},client))
 
 
 if __name__=='__main__':unittest.main()

@@ -74,6 +74,23 @@ def ws_restriction(decoded):
     return None
 
 
+def valid_ws_quote(decoded,client):
+    """Validate the requested quote without formatting unused transaction routes."""
+    try:
+        quotes=decoded.get('StreamData',{}).get('payload',{}).get('SwapQuotes',{}).get('quotes',{})
+    except (AttributeError,TypeError):return False
+    if not isinstance(quotes,dict):return False
+    for row in quotes.values():
+        if not isinstance(row,dict) or row.get('error'):continue
+        try:
+            if int(row.get('inAmount',0))!=50_000_000 or int(row.get('outAmount',0))<=0:continue
+        except (TypeError,ValueError):continue
+        if any(row.get(key) and client._safe_str(row[key])!=expected for key,expected in
+               [('inputMint',client.INPUT_MINT_USDT),('outputMint',client.INPUT_MINT_SOL)]):continue
+        return True
+    return False
+
+
 class Stage:
     def __init__(self,args,proxies,rps,ws_count,baseline=None,ws_baseline=None):
         self.args,self.proxies,self.rps,self.ws_count,self.baseline=args,proxies,rps,ws_count,baseline
@@ -281,8 +298,7 @@ class Stage:
                     if restriction:
                         self.counts['ws_restriction_'+restriction]+=1
                         self.halt('api_ws_restriction');break
-                    parsed=self.titan.process_quote_response(decoded,self.titan.INPUT_MINT_SOL)
-                    if not parsed.get('error') and int(parsed.get('outAmount',0))>0:
+                    if valid_ws_quote(decoded,self.titan):
                         now=time.monotonic()
                         if index in self.ws_last and self.measuring:self.gaps.append((now-self.ws_last[index])*1000)
                         self.ws_last[index]=now
