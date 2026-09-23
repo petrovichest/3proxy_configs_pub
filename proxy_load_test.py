@@ -39,6 +39,15 @@ def resource_stop(sample):
     return None
 
 
+def process_usage(pid):
+    """Include the running Node bridge, which is not counted by RUSAGE_SELF."""
+    directory=Path('/proc')/str(pid)
+    fields=(directory/'stat').read_text().rsplit(') ',1)[1].split()
+    status=dict(line.split(':',1) for line in (directory/'status').read_text().splitlines() if ':' in line)
+    return {'cpu_seconds':(int(fields[11])+int(fields[12]))/os.sysconf('SC_CLK_TCK'),
+            'rss':int(status['VmRSS'].split()[0])*1024}
+
+
 class Stage:
     def __init__(self,args,proxies,rps,ws_count,baseline=None):
         self.args,self.proxies,self.rps,self.ws_count,self.baseline=args,proxies,rps,ws_count,baseline
@@ -79,6 +88,7 @@ class Stage:
         local_interface=next((row['dev'] for row in routes if 'dev' in row),'lo')
         previous_local=None
         previous_usage=None
+        previous_bridge=None
         remote_command=shlex.join(['python3','-u',self.args.remote_directory+'/capacity_monitor.py',
             '--interface',self.args.interface,'--interval','5'])
         self.process=await asyncio.create_subprocess_exec('ssh','-o','BatchMode=yes','-o','ConnectTimeout=10',
@@ -99,6 +109,13 @@ class Stage:
                     elapsed=local['time']-previous_local['time']
                     local['process_cpu_percent']=100*(usage.ru_utime+usage.ru_stime-previous_usage)/elapsed
                     self.counts['generator_cpu_max']=max(self.counts['generator_cpu_max'],round(local['process_cpu_percent'],1))
+                if self.bridge and self.bridge.process and self.bridge.process.returncode is None:
+                    bridge_usage=process_usage(self.bridge.process.pid)
+                    local['bridge_rss']=bridge_usage['rss']
+                    if previous_bridge and previous_local:
+                        local['bridge_cpu_percent']=100*(bridge_usage['cpu_seconds']-previous_bridge['cpu_seconds'])/elapsed
+                        self.counts['bridge_cpu_max']=max(self.counts['bridge_cpu_max'],round(local['bridge_cpu_percent'],1))
+                    previous_bridge=bridge_usage
                 previous_local,previous_usage=local,usage.ru_utime+usage.ru_stime
                 self.metrics.write(json.dumps({'kind':'generator',**local})+'\n');self.metrics.flush()
                 if local['memory_available']<1024**3:self.halt('generator_memory')
@@ -244,6 +261,9 @@ class Stage:
         except asyncio.CancelledError:raise
         except Exception as exc:
             self.counts['ws_error_'+type(exc).__name__]+=1
+            # The existing transport exposes only a short code, never its URL/token.
+            code=re.fullmatch(r'Titan Node WebSocket (?:open failed: )?([A-Za-z0-9_]+)',str(exc))
+            if code:self.counts['ws_code_'+code.group(1)]+=1
             if not self.stop.is_set():self.halt('ws_connection_failure')
         finally:
             if ping:
