@@ -75,8 +75,9 @@ def ws_restriction(decoded):
 
 
 class Stage:
-    def __init__(self,args,proxies,rps,ws_count,baseline=None):
+    def __init__(self,args,proxies,rps,ws_count,baseline=None,ws_baseline=None):
         self.args,self.proxies,self.rps,self.ws_count,self.baseline=args,proxies,rps,ws_count,baseline
+        self.ws_baseline=ws_baseline
         self.stop=asyncio.Event()
         self.monitor_ready=asyncio.Event()
         self.reason=None
@@ -127,7 +128,8 @@ class Stage:
                 row=json.loads(raw)
                 self.monitor_ready.set()
                 self.samples.append(row)
-                self.metrics.write(json.dumps({'kind':'server',**row})+'\n');self.metrics.flush()
+                stage_info={'http_rps':self.rps,'ws_target':self.ws_count,'phase':'measurement' if self.measuring else 'warmup'}
+                self.metrics.write(json.dumps({'kind':'server',**stage_info,**row})+'\n');self.metrics.flush()
                 local=await asyncio.to_thread(snapshot,local_interface)
                 usage=resource.getrusage(resource.RUSAGE_SELF)
                 local['process_rss_peak']=usage.ru_maxrss*1024
@@ -143,7 +145,7 @@ class Stage:
                         self.counts['bridge_cpu_max']=max(self.counts['bridge_cpu_max'],round(local['bridge_cpu_percent'],1))
                     previous_bridge=bridge_usage
                 previous_local,previous_usage=local,usage.ru_utime+usage.ru_stime
-                self.metrics.write(json.dumps({'kind':'generator',**local})+'\n');self.metrics.flush()
+                self.metrics.write(json.dumps({'kind':'generator',**stage_info,**local})+'\n');self.metrics.flush()
                 if local['memory_available']<1024**3:self.halt('generator_memory')
                 reason=resource_stop(row)
                 if reason:self.halt(reason)
@@ -158,6 +160,8 @@ class Stage:
                     if errors/len(self.recent)>.01:self.halt('http_error_rate')
                 if self.measuring and self.baseline and len(self.latencies)>=30 and percentile(self.latencies,.95)>2*self.baseline:
                     self.halt('http_latency')
+                if self.measuring and self.ws_baseline and len(self.gaps)>=30 and percentile(self.gaps,.95)>2*self.ws_baseline:
+                    self.halt('ws_update_latency')
                 if self.measuring and self.ws_count:
                     stale=sum(now-t>10 for t in self.ws_last.values())
                     if stale/max(1,self.ws_count)>.01:self.halt('ws_stale_quotes')
@@ -374,11 +378,13 @@ async def main():
     parser.add_argument('--ramp',action='store_true')
     parser.add_argument('--ramp-axis',choices=['http','ws'],default='http')
     parser.add_argument('--baseline-p95-ms',type=float,help='Reuse a measured low-load HTTP p95 for a separate boundary/soak test')
+    parser.add_argument('--baseline-ws-p95-ms',type=float,help='Reuse a measured low-load WebSocket update-gap p95')
     parser.add_argument('--limit-proxies',type=int,default=0)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
     if args.rps<=0 or args.connections<=0 or args.warmup<0 or args.duration<=0:parser.error('Invalid load/duration')
     if args.baseline_p95_ms is not None and args.baseline_p95_ms<=0:parser.error('Baseline p95 must be positive')
+    if args.baseline_ws_p95_ms is not None and args.baseline_ws_p95_ms<=0:parser.error('WebSocket baseline p95 must be positive')
     os.umask(0o077)
     args.parser_root=args.parser_root.resolve()
     sys.path[:0]=[str(args.parser_root),str(args.parser_root.parent/'arb_parsers_models')]
@@ -396,13 +402,15 @@ async def main():
     rps=args.rps if args.profile!='ws' else 0
     connections=args.connections if args.profile!='http' else 0
     baseline=args.baseline_p95_ms
+    ws_baseline=args.baseline_ws_p95_ms
     while True:
         if rps>len(proxies):
             print(json.dumps({'event':'profile_limit','reason':'one_http_request_per_proxy_per_second'}),flush=True);break
-        stage=Stage(args,proxies,rps,connections,baseline)
+        stage=Stage(args,proxies,rps,connections,baseline,ws_baseline)
         result=await stage.run()
         if result['status']!='passed' or not args.ramp:return 0 if result['status']=='passed' else 2
         baseline=baseline or result['http_latency_ms']['p95']
+        ws_baseline=ws_baseline or result['ws_gap_ms']['p95']
         if args.profile=='ws' or (args.profile=='mixed' and args.ramp_axis=='ws'):
             connections=math.ceil(connections*1.5)
         else:rps=math.ceil(rps*1.5)
