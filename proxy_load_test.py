@@ -138,6 +138,7 @@ class Stage:
         self.process=await asyncio.create_subprocess_exec('ssh','-o','BatchMode=yes','-o','ConnectTimeout=10',
             'root@'+self.args.host,remote_command,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
         cpu_high_since=None
+        backlog_since=None
         try:
             while not self.stop.is_set():
                 raw=await asyncio.wait_for(self.process.stdout.readline(),20)
@@ -161,12 +162,18 @@ class Stage:
                         local['bridge_cpu_percent']=100*(bridge_usage['cpu_seconds']-previous_bridge['cpu_seconds'])/elapsed
                         self.counts['bridge_cpu_max']=max(self.counts['bridge_cpu_max'],round(local['bridge_cpu_percent'],1))
                     previous_bridge=bridge_usage
+                    local['ws_queued_messages']=sum(state['events'].qsize() for state in self.bridge._connections.values())
+                    self.counts['generator_ws_queued_max']=max(self.counts['generator_ws_queued_max'],local['ws_queued_messages'])
                 previous_local,previous_usage=local,usage.ru_utime+usage.ru_stime
                 self.metrics.write(json.dumps({'kind':'generator',**stage_info,**local})+'\n');self.metrics.flush()
                 if local['memory_available']<1024**3:self.halt('generator_memory')
                 reason=resource_stop(row)
                 if reason:self.halt(reason)
                 now=time.monotonic()
+                if self.measuring and self.ws_count and local.get('ws_queued_messages',0)>2*self.ws_count:
+                    backlog_since=backlog_since or now
+                    if now-backlog_since>=10:self.halt('generator_ws_backlog')
+                else:backlog_since=None
                 if row.get('cpu_percent',0)>90:
                     cpu_high_since=cpu_high_since or now
                     if now-cpu_high_since>=60:self.halt('server_cpu')
