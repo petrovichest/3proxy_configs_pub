@@ -345,10 +345,12 @@ async def main():
     parser.add_argument('--duration',type=float,default=300)
     parser.add_argument('--ramp',action='store_true')
     parser.add_argument('--ramp-axis',choices=['http','ws'],default='http')
+    parser.add_argument('--baseline-p95-ms',type=float,help='Reuse a measured low-load HTTP p95 for a separate boundary/soak test')
     parser.add_argument('--limit-proxies',type=int,default=0)
     parser.add_argument('--output',type=Path,required=True)
     args=parser.parse_args()
     if args.rps<=0 or args.connections<=0 or args.warmup<0 or args.duration<=0:parser.error('Invalid load/duration')
+    if args.baseline_p95_ms is not None and args.baseline_p95_ms<=0:parser.error('Baseline p95 must be positive')
     os.umask(0o077)
     args.parser_root=args.parser_root.resolve()
     sys.path[:0]=[str(args.parser_root),str(args.parser_root.parent/'arb_parsers_models')]
@@ -365,7 +367,7 @@ async def main():
     if args.limit_proxies:proxies=proxies[:args.limit_proxies]
     rps=args.rps if args.profile!='ws' else 0
     connections=args.connections if args.profile!='http' else 0
-    baseline=None
+    baseline=args.baseline_p95_ms
     while True:
         if rps>len(proxies):
             print(json.dumps({'event':'profile_limit','reason':'one_http_request_per_proxy_per_second'}),flush=True);break
