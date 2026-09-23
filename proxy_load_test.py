@@ -12,6 +12,8 @@ import random
 import re
 import resource
 import signal
+import shlex
+import subprocess
 import sys
 import time
 from urllib.parse import quote
@@ -41,6 +43,7 @@ class Stage:
     def __init__(self,args,proxies,rps,ws_count,baseline=None):
         self.args,self.proxies,self.rps,self.ws_count,self.baseline=args,proxies,rps,ws_count,baseline
         self.stop=asyncio.Event()
+        self.monitor_ready=asyncio.Event()
         self.reason=None
         self.counts=Counter()
         self.latencies=deque(maxlen=200000)
@@ -71,17 +74,34 @@ class Stage:
         if status in (401,403,429):self.halt(f'api_http_{status}')
 
     async def monitor(self):
+        from capacity_monitor import snapshot
+        routes=json.loads(subprocess.check_output(['ip','-j','route','show','default'],text=True))
+        local_interface=next((row['dev'] for row in routes if 'dev' in row),'lo')
+        previous_local=None
+        previous_usage=None
+        remote_command=shlex.join(['python3','-u',self.args.remote_directory+'/capacity_monitor.py',
+            '--interface',self.args.interface,'--interval','5'])
         self.process=await asyncio.create_subprocess_exec('ssh','-o','BatchMode=yes','-o','ConnectTimeout=10',
-            'root@'+self.args.host,'python3','-u',self.args.remote_directory+'/capacity_monitor.py',
-            '--interface',self.args.interface,'--interval','5',stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
+            'root@'+self.args.host,remote_command,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
         cpu_high_since=None
         try:
             while not self.stop.is_set():
                 raw=await asyncio.wait_for(self.process.stdout.readline(),20)
                 if not raw:raise RuntimeError('Monitor ended')
                 row=json.loads(raw)
+                self.monitor_ready.set()
                 self.samples.append(row)
                 self.metrics.write(json.dumps({'kind':'server',**row})+'\n');self.metrics.flush()
+                local=await asyncio.to_thread(snapshot,local_interface)
+                usage=resource.getrusage(resource.RUSAGE_SELF)
+                local['process_rss_peak']=usage.ru_maxrss*1024
+                if previous_local:
+                    elapsed=local['time']-previous_local['time']
+                    local['process_cpu_percent']=100*(usage.ru_utime+usage.ru_stime-previous_usage)/elapsed
+                    self.counts['generator_cpu_max']=max(self.counts['generator_cpu_max'],round(local['process_cpu_percent'],1))
+                previous_local,previous_usage=local,usage.ru_utime+usage.ru_stime
+                self.metrics.write(json.dumps({'kind':'generator',**local})+'\n');self.metrics.flush()
+                if local['memory_available']<1024**3:self.halt('generator_memory')
                 reason=resource_stop(row)
                 if reason:self.halt(reason)
                 now=time.monotonic()
@@ -243,6 +263,7 @@ class Stage:
         measured_seconds=0
         print(json.dumps({'event':'stage_start','http_rps':self.rps,'ws_connections':self.ws_count,'proxy_count':len(self.proxies)}),flush=True)
         try:
+            await asyncio.wait_for(self.monitor_ready.wait(),20)
             await self.prepare()
             if self.rps:self.workers.append(asyncio.create_task(self.http_loop()))
             for index in range(self.ws_count):
