@@ -8,6 +8,7 @@ import re
 import subprocess # Добавляем импорт для выполнения внешних команд
 import sys # Добавляем импорт для sys
 import ipaddress # Добавляем импорт для работы с IP-адресами
+from setup_proxy_logging import add_logging_to_config, logging_block
 # Примеры использования:
 # python3 1_generate_proxy_configs.py 20 MyProject
 # (сгенерирует 20 прокси для проекта "MyProject")
@@ -174,6 +175,7 @@ def generate_proxy_configs(
     Генерирует конфигурации прокси для указанного проекта.
     Использует внутренние параметры для портов и IPv6.
     """
+    logging_block(project_name)  # Проверяем имя до изменения сети и состояния генератора.
     # Перед проверкой и добавлением маршрута, убедимся, что к интерфейсу привязан хотя бы один IPv6 адрес
     bind_ipv6_address(ipv6_subnet, interface)
     # Проверяем и добавляем IPv6 маршрут по умолчанию, если необходимо
@@ -335,8 +337,7 @@ echo "Настройка сети IPv6 завершена."
 
     full_config_filename = os.path.join(session_output_dir, "full_proxy_config")
     with open(full_config_filename, "w") as f:
-        f.write(formatted_headers) # Добавляем заголовки
-        f.write("\n".join(proxy_lines) + "\n") # Добавляем пустую строку в конце для чистоты
+        f.write(add_logging_to_config(formatted_headers + "\n".join(proxy_lines) + "\n", project_name))
 
     credentials_output_filename = os.path.join(session_output_dir, "proxy_configs")
     with open(credentials_output_filename, "w") as f:
@@ -348,6 +349,10 @@ echo "Настройка сети IPv6 завершена."
 
     # ******************* Создание start.sh для PM2 *******************
     start_script_content = f"""#!/bin/bash
+set -e
+PROJECT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+sudo python3 "$PROJECT_DIR/../../setup_proxy_logging.py" "$PROJECT_DIR/full_proxy_config"
+cd "$PROJECT_DIR"
 pm2 start {os.path.join("..", "..", "3proxy_binaries", "3proxy")} --name {project_name} -- {os.path.basename(full_config_filename)}
 """
     start_script_filename = os.path.join(session_output_dir, "start.sh")
@@ -381,6 +386,10 @@ WantedBy=multi-user.target
 """
 
     start_systemctl_script_content = f"""#!/bin/bash
+set -e
+
+PROJECT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+sudo python3 "$PROJECT_DIR/../../setup_proxy_logging.py" "$PROJECT_DIR/full_proxy_config"
 
 SERVICE_FILE_PATH="/etc/systemd/system/3proxy-{project_name}.service"
 

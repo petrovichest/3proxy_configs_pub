@@ -12,7 +12,7 @@ sudo apt update || { echo "Ошибка: Не удалось обновить с
 
 # 2. Проверка и установка python3-pip и python3-venv
 echo "Проверка и установка python3-pip и python3-venv..."
-sudo apt install -y python3-pip python3-venv || { echo "Ошибка: Не удалось установить python3-pip или python3-venv."; exit 1; }
+sudo apt install -y python3-pip python3-venv logrotate || { echo "Ошибка: Не удалось установить python3-pip, python3-venv или logrotate."; exit 1; }
 
 # 3. Создание виртуального окружения
 ENV_DIR="venv"
