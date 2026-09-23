@@ -209,3 +209,9 @@ __marimo__/
 generated_proxies.txt
 generated_proxy_configs/
 downloaded_configs/
+
+# Generated credentials, binaries, allocation state and local benchmark reports.
+/generated_proxy_configs/
+/downloaded_configs/
+/3proxy_binaries/
+/capacity_results/

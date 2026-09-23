@@ -1,33 +1,4 @@
-#!/bin/bash
-
-# Скрипт для запуска 1_generate_proxy_configs.py с активацией виртуального окружения
-
-# Определяем базовую директорию проекта
-BASE_DIR=$(
-  cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
-)
-
-# Обновляем репозиторий перед запуском
-echo "Обновление репозитория..."
-(cd "$BASE_DIR" && git pull)
-if [ $? -ne 0 ]; then
-  echo "Ошибка: Не удалось обновить репозиторий. Проверьте подключение к интернету или права доступа."
-  exit 1
-fi
-echo "Репозиторий успешно обновлен."
-
-# Активируем виртуальное окружение
-if [ -d "$BASE_DIR/venv" ]; then
-  source "$BASE_DIR/venv/bin/activate"
-  echo "Виртуальное окружение активировано."
-else
-  echo "Ошибка: Виртуальное окружение 'venv' не найдено в директории $BASE_DIR."
-  echo "Пожалуйста, запустите install_python_env.sh для его создания."
-  exit 1
-fi
-
-# Запускаем Python скрипт, передавая все аргументы
-python "$BASE_DIR/1_generate_proxy_configs.py" "$@"
-
-# Деактивируем виртуальное окружение (необязательно, но хорошая практика для скриптов)
-deactivate
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "$0")"
+exec ./venv/bin/python 1_generate_proxy_configs.py "$@"

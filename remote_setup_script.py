@@ -1,379 +1,122 @@
-# -*- coding: utf-8 -*-
-import paramiko
-import time
+#!/usr/bin/env python3
+"""Idempotent SSH deployment; application files reach the server through Git."""
+import argparse
+import getpass
+import json
 import os
+from pathlib import Path
+import shlex
+import subprocess
 import sys
-import getpass # Добавляем импорт getpass
+import time
 
-def run_remote_command(hostname, username, password=None, key_filepath=None, command=None, sudo_password=None):
-    """
-    Выполняет команду на удаленном сервере по SSH.
+import paramiko
 
-    Args:
-        hostname (str): IP-адрес или доменное имя удаленного сервера.
-        username (str): Имя пользователя для SSH.
-        password (str): Пароль для SSH (если используется аутентификация по паролю).
-        key_filepath (str): Путь к приватному SSH-ключу (если используется аутентификация по ключу).
-        command (str): Команда, которую нужно выполнить на удаленном сервере.
-        sudo_password (str): Пароль для sudo (если команда требует sudo).
 
-    Returns:
-        tuple: Кортеж из стандартного вывода (stdout) и стандартного вывода ошибок (stderr).
-    """
-
+def connect(host, user, key=None, password=None):
+    config = paramiko.SSHConfig()
+    path = Path.home()/'.ssh/config'
+    if path.exists():
+        with path.open() as stream:
+            config.parse(stream)
+    settings = config.lookup(host)
     client = paramiko.SSHClient()
     client.load_system_host_keys()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    client.connect(hostname=settings.get('hostname',host),port=int(settings.get('port',22)),
+                   username=user or settings.get('user','root'),password=password,
+                   key_filename=key or settings.get('identityfile'),allow_agent=True,
+                   look_for_keys=True,timeout=15,banner_timeout=15,auth_timeout=20)
+    client.get_transport().set_keepalive(30)
+    return client
 
+
+def run(client, argv, cwd=None):
+    command=shlex.join([str(x) for x in argv])
+    if cwd:
+        command=f'cd {shlex.quote(cwd)} && '+command
+    channel=client.get_transport().open_session(timeout=20)
+    channel.exec_command(command)
+    output=[]
+    deadline=time.monotonic()+1800
     try:
-        if password:
-            client.connect(hostname=hostname, username=username, password=password, timeout=10)
-        elif key_filepath:
-            client.connect(hostname=hostname, username=username, key_filename=key_filepath, timeout=10)
-        else:
-            raise ValueError("Необходимо предоставить либо пароль, либо путь к SSH-ключу.")
-
-        print(f"Подключение к {hostname} установлено.")
-
-        if command:
-            print(f"Выполнение команды: {command}")
-            stdin, stdout, stderr = client.exec_command(command, get_pty=True)
-
-            if "sudo" in command.lower() and sudo_password:
-                stdin.write(sudo_password + '\n')
-                stdin.flush()
-            
-            # Чтение вывода с небольшой задержкой, чтобы избежать обрезки больших результатов
-            output = ""
-            error = ""
-            while True:
-                line = stdout.readline()
-                if not line:
-                    break
-                output += line
-            while True:
-                line = stderr.readline()
-                if not line:
-                    break
-                error += line
-
-            print(f"STDOUT:\n{output}")
-            if error:
-                print(f"STDERR:\n{error}")
-            return output, error
-        else:
-            print("Команда не предоставлена для выполнения.")
-            return "", ""
-
-    except paramiko.AuthenticationException:
-        print("Ошибка аутентификации. Проверьте учетные данные.")
-        return "", "Authentication failed"
-    except paramiko.SSHException as e:
-        print(f"SSH-ошибка: {e}")
-        return "", f"SSH error: {e}"
-    except Exception as e:
-        print(f"Произошла ошибка: {e}")
-        return "", f"General error: {e}"
+        while True:
+            while channel.recv_ready():
+                chunk=channel.recv(65536).decode(errors='replace')
+                output.append(chunk)
+                print(chunk,end='',flush=True)
+            while channel.recv_stderr_ready():
+                chunk=channel.recv_stderr(65536).decode(errors='replace')
+                print(chunk,end='',file=sys.stderr,flush=True)
+            if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                break
+            if time.monotonic()>deadline:
+                raise TimeoutError('Remote command exceeded 30 minutes')
+            time.sleep(.02)
+        code=channel.recv_exit_status()
+        if code:
+            raise subprocess.CalledProcessError(code,argv)
+        return ''.join(output)
     finally:
-        if client:
-            client.close()
-            print("SSH-соединение закрыто.")
+        channel.close()
 
-def download_file_sftp(hostname, username, password=None, key_filepath=None, remote_path=None, local_path=None):
-    """
-    Скачивает файл с удаленного сервера по SFTP.
 
-    Args:
-        hostname (str): IP-адрес или доменное имя удаленного сервера.
-        username (str): Имя пользователя для SSH.
-        password (str): Пароль для SSH (если используется аутентификация по паролю).
-        key_filepath (str): Путь к приватному SSH-ключу (если используется аутентификация по ключу).
-        remote_path (str): Путь к файлу на удаленном сервере.
-        local_path (str): Путь для сохранения файла на локальной машине.
-    """
-    transport = None
-    sftp = None
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host')
+    parser.add_argument('--user',default='root')
+    parser.add_argument('--key')
+    parser.add_argument('--password',action='store_true',help='Prompt securely for an SSH password')
+    parser.add_argument('--target-count',type=int)
+    parser.add_argument('--project-prefix',default='capacity')
+    parser.add_argument('--batch-size',type=int,default=1000)
+    parser.add_argument('--ipv6-subnet')
+    parser.add_argument('--interface')
+    parser.add_argument('--repo-url',default='https://github.com/petrovichest/3proxy_configs_pub.git')
+    parser.add_argument('--directory',default='/home/3proxy_configs_pub')
+    parser.add_argument('--skip-install',action='store_true')
+    parser.add_argument('--output-dir',type=Path,default=Path('downloaded_configs'))
+    args=parser.parse_args()
+    args.host=args.host or input('SSH host: ').strip()
+    args.target_count=args.target_count if args.target_count is not None else int(input('Total proxy count: '))
+    args.ipv6_subnet=args.ipv6_subnet or input('IPv6 subnet: ').strip()
+    args.interface=args.interface or input('Network interface: ').strip()
+    if args.target_count<=0 or not 1<=args.batch_size<=1000:
+        parser.error('Positive target count and batch size 1..1000 required')
+    os.umask(0o077)
+    client=connect(args.host,args.user,args.key,getpass.getpass('SSH password: ') if args.password else None)
     try:
-        transport = paramiko.Transport((hostname, 22))
-        if password:
-            transport.connect(username=username, password=password)
-        elif key_filepath:
-            key = paramiko.RSAKey.from_private_key_file(key_filepath)
-            transport.connect(username=username, pkey=key)
+        sftp=client.open_sftp()
+        try:
+            sftp.stat(args.directory+'/.git')
+        except FileNotFoundError:
+            run(client,['git','clone',args.repo_url,args.directory])
         else:
-            raise ValueError("Необходимо предоставить либо пароль, либо путь к SSH-ключу.")
-
-        sftp = paramiko.SFTPClient.from_transport(transport)
-        print(f"Скачивание файла с {remote_path} на {local_path}...")
-        sftp.get(remote_path, local_path)
-        print(f"Файл успешно скачан: {local_path}")
-    except FileNotFoundError:
-        print(f"Ошибка: Удаленный файл не найден по пути: {remote_path}")
-    except paramiko.AuthenticationException:
-        print("Ошибка аутентификации. Проверьте учетные данные.")
-    except paramiko.SSHException as e:
-        print(f"SSH-ошибка при скачивании файла: {e}")
-    except Exception as e:
-        print(f"Произошла ошибка при скачивании файла: {e}")
+            run(client,['git','pull','--ff-only'],args.directory)
+        if not args.skip_install:
+            run(client,['bash','install_all.sh'],args.directory)
+        output=run(client,['venv/bin/python','1_generate_proxy_configs.py',
+                    '--target-count',str(args.target_count),'--project-prefix',args.project_prefix,
+                    '--batch-size',str(args.batch_size),'--ipv6-subnet',args.ipv6_subnet,
+                    '--interface',args.interface,'--external-ipv4',client.get_transport().getpeername()[0],'--start'],args.directory)
+        summary=json.loads(output.strip().splitlines()[-1])
+        local=args.output_dir/args.host
+        local.mkdir(mode=0o700,parents=True,exist_ok=True)
+        combined=[]
+        for project in summary['projects']:
+            dest=local/project
+            dest.mkdir(mode=0o700,exist_ok=True)
+            for name in ('extracted_proxy','proxy_configs'):
+                sftp.get(f'{args.directory}/generated_proxy_configs/{project}/{name}',str(dest/name))
+                (dest/name).chmod(0o600)
+            combined.extend((dest/'extracted_proxy').read_text().splitlines())
+        (local/'extracted_proxy').write_text('\n'.join(combined)+'\n')
+        (local/'extracted_proxy').chmod(0o600)
+        print(f'Deployed {len(combined)} proxies; credentials saved privately to {local}')
+        sftp.close()
     finally:
-        if sftp:
-            sftp.close()
-        if transport:
-            transport.close()
+        client.close()
 
 
-if __name__ == "__main__":
-    # --- НАСТРОЙКИ ПОДКЛЮЧЕНИЯ ---
-    REMOTE_HOST = input(f"Введите IP-адрес удаленного сервера: ")
-    REMOTE_USER = input(f"Введите имя пользователя для SSH (по умолчанию: root): ") or "root"
-    AUTH_PASSWORD = getpass.getpass(f"Введите пароль для SSH / Sudo (не будет отображаться): ")
-    SUDO_PASSWORD = AUTH_PASSWORD
-    AUTH_KEY_FILEPATH = None # Пока не используем SSH-ключ для упрощения
-
-    DEFAULT_GIT_REPO_URL = "https://github.com/petrovichest/3proxy_configs_pub.git"
-    DEFAULT_GIT_CLONE_DESTINATION = "/home"
-
-    # --- НАСТРОЙКИ GIT КЛОНИРОВАНИЯ ---
-    GIT_REPO_URL = input(f"Введите URL Git репозитория (по умолчанию: {DEFAULT_GIT_REPO_URL}): ") or DEFAULT_GIT_REPO_URL
-    GIT_CLONE_DESTINATION = input(f"Введите путь для клонирования Git репозитория на удаленном сервере (по умолчанию: {DEFAULT_GIT_CLONE_DESTINATION}): ") or DEFAULT_GIT_CLONE_DESTINATION
-
-    # Извлекаем имя репозитория из URL для определения конечной папки, созданной git clone
-    REPO_NAME = GIT_REPO_URL.split('/')[-1]
-    if REPO_NAME.endswith('.git'):
-        REPO_NAME = REPO_NAME[:-4]
-    ACTUAL_CLONE_DIR = os.path.join(GIT_CLONE_DESTINATION, REPO_NAME)
-
-    # --- ЗАПРОС ПАРАМЕТРОВ ДЛЯ 1_generate_proxy_configs.py ---
-    print("\n--- Введите параметры для генерации прокси ---")
-    num_proxies_input = ""
-    while not num_proxies_input.isdigit() or int(num_proxies_input) <= 0:
-        num_proxies_input = input("Количество прокси для генерации в каждой пачке (целое положительное число): ")
-        if not num_proxies_input.isdigit() or int(num_proxies_input) <= 0:
-            print("Некорректный ввод. Пожалуйста, введите целое положительное число.")
-    num_proxies_input = int(num_proxies_input)
-
-    base_project_name_input = ""
-    while not base_project_name_input.strip():
-        base_project_name_input = input("Базовое имя проекта (будет добавлен номер пачки, например: proxy_1, proxy_2): ")
-        if not base_project_name_input.strip():
-            print("Имя проекта не может быть пустым.")
-    
-    # --- НОВЫЙ ЗАПРОС: КОЛИЧЕСТВО ПАЧЕК ---
-    num_batches_input = ""
-    while not num_batches_input.isdigit() or int(num_batches_input) <= 0 or int(num_batches_input) > 10:
-        num_batches_input = input("Сколько пачек прокси создать? (1-10, по умолчанию: 1): ") or "1"
-        if not num_batches_input.isdigit() or int(num_batches_input) <= 0 or int(num_batches_input) > 10:
-            print("Некорректный ввод. Пожалуйста, введите число от 1 до 10.")
-    num_batches = int(num_batches_input)
-
-    ipv6_subnet_input = ""
-    while not ipv6_subnet_input.strip():
-        ipv6_subnet_input = input("IPv6 подсеть (например, 2a03:a03:a03::/48 или 2a03:a03:a03:a03::/64): ")
-        if not ipv6_subnet_input.strip():
-            print("IPv6 подсеть не может быть пустой.")
-
-    interface_input = ""
-    while not interface_input.strip():
-        interface_input = input("Сетевой интерфейс для привязки (например, ens3 или eth0): ")
-        if not interface_input.strip():
-            print("Сетевой интерфейс не может быть пустым.")
-
-    external_ipv4_input = REMOTE_HOST
-    print(f"Внешний IPv4-адрес сервера: {external_ipv4_input} (взято из REMOTE_HOST)")
-
-    # --- ВЫПОЛНЕНИЕ ПОСЛЕДОВАТЕЛЬНОСТИ УСТАНОВКИ И ЗАПУСКА ---
-    print("\n--- Выполнение последовательности установки и запуска ---")
-
-    # 1. sudo apt update
-    print("\n--- Выполнение 'sudo apt update' ---")
-    stdout, stderr = run_remote_command(
-        hostname=REMOTE_HOST,
-        username=REMOTE_USER,
-        password=AUTH_PASSWORD,
-        key_filepath=AUTH_KEY_FILEPATH,
-        command="sudo apt update",
-        sudo_password=SUDO_PASSWORD
-    )
-    if stderr:
-        print("Ошибка при выполнении 'apt update'. Проверьте stderr выше.")
-        # Добавляем выход из скрипта при критической ошибке
-        sys.exit(1)
-
-    # 2. sudo apt install git
-    print("\n--- Выполнение 'sudo apt install git -y' ---")
-    stdout, stderr = run_remote_command(
-        hostname=REMOTE_HOST,
-        username=REMOTE_USER,
-        password=AUTH_PASSWORD,
-        key_filepath=AUTH_KEY_FILEPATH,
-        command="sudo apt install git -y",
-        sudo_password=SUDO_PASSWORD
-    )
-    if stderr:
-        print("Ошибка при установке 'git'. Проверьте stderr выше.")
-        sys.exit(1)
-
-    # 3. Клонирование или обновление Git репозитория
-    if GIT_REPO_URL and GIT_CLONE_DESTINATION:
-        repo_url_for_clone = GIT_REPO_URL
-        
-        # Проверяем, существует ли директория репозитория на удаленной машине
-        check_dir_command = f"test -d {ACTUAL_CLONE_DIR} && echo 'exists'"
-        stdout_check, stderr_check = run_remote_command(
-            hostname=REMOTE_HOST,
-            username=REMOTE_USER,
-            password=AUTH_PASSWORD,
-            key_filepath=AUTH_KEY_FILEPATH,
-            command=check_dir_command,
-            sudo_password=SUDO_PASSWORD
-        )
-
-        if "exists" in stdout_check:
-            print(f"\n--- Репозиторий {ACTUAL_CLONE_DIR} уже существует. Выполняю git pull ---")
-            stdout, stderr = run_remote_command(
-                hostname=REMOTE_HOST,
-                username=REMOTE_USER,
-                password=AUTH_PASSWORD,
-                key_filepath=AUTH_KEY_FILEPATH,
-                command=f"cd {ACTUAL_CLONE_DIR} && git pull",
-                sudo_password=SUDO_PASSWORD
-            )
-            if stderr:
-                print("Ошибка при выполнении git pull. Проверьте stderr выше.")
-                sys.exit(1)
-        else:
-            print(f"\n--- Клонирование репозитория {repo_url_for_clone} в {ACTUAL_CLONE_DIR} ---")
-            stdout, stderr = run_remote_command(
-                hostname=REMOTE_HOST,
-                username=REMOTE_USER,
-                password=AUTH_PASSWORD,
-                key_filepath=AUTH_KEY_FILEPATH,
-                command=f"git clone {repo_url_for_clone} {ACTUAL_CLONE_DIR}",
-                sudo_password=SUDO_PASSWORD
-            )
-            if stderr and "already exists" not in stderr: # "already exists" не будет ошибкой здесь, т.к. мы уже проверили
-                print("Ошибка при клонировании репозитория. Проверьте stderr выше.")
-                sys.exit(1)
-    else:
-        print("\n--- Пропущен шаг клонирования репозитория: не указан URL или путь для клонирования ---")
-        sys.exit(1)
-    
-    # Запуск install_all.sh
-    print(f"\n--- Запуск install_all.sh в {ACTUAL_CLONE_DIR} ---")
-    stdout, stderr = run_remote_command(
-        hostname=REMOTE_HOST,
-        username=REMOTE_USER,
-        password=AUTH_PASSWORD,
-        key_filepath=AUTH_KEY_FILEPATH,
-        command=f"cd {ACTUAL_CLONE_DIR} && bash install_all.sh",
-        sudo_password=SUDO_PASSWORD
-    )
-    if stderr:
-        print("Ошибка при запуске install_all.sh. Проверьте stderr выше.")
-        sys.exit(1)
-    
-    # --- НОВАЯ ЛОГИКА: СОЗДАНИЕ НЕСКОЛЬКИХ ПАЧЕК ПРОКСИ ---
-    print(f"\n--- Создание {num_batches} пачек прокси ---")
-    
-    project_name = base_project_name_input
-    local_output_dir = "downloaded_configs"
-    project_output_dir = os.path.join(local_output_dir, project_name)
-    
-    # Создаем корневую папку проекта
-    os.makedirs(project_output_dir, exist_ok=True)
-    
-    for batch_num in range(1, num_batches + 1):
-        current_project_name = f"{base_project_name_input}_{batch_num}"
-        print(f"\n--- Создание пачки {batch_num}/{num_batches}: {current_project_name} ---")
-        
-        # Формируем аргументы для run_generator.sh
-        generator_params_for_script = (
-            f"{num_proxies_input} "
-            f"{current_project_name} "
-            f"--ipv6-subnet {ipv6_subnet_input} "
-            f"--interface {interface_input} "
-            f"--external-ipv4 {external_ipv4_input}"
-        )
-        
-        # Запуск run_generator.sh для текущей пачки
-        print(f"\n--- Запуск run_generator.sh для {current_project_name} ---")
-        run_command = f"cd {ACTUAL_CLONE_DIR} && sudo bash run_generator.sh {generator_params_for_script}"
-        stdout, stderr = run_remote_command(
-            hostname=REMOTE_HOST,
-            username=REMOTE_USER,
-            password=AUTH_PASSWORD,
-            key_filepath=AUTH_KEY_FILEPATH,
-            command=run_command,
-            sudo_password=SUDO_PASSWORD
-        )
-        if stderr:
-            print(f"Ошибка при запуске run_generator.sh для {current_project_name}. Продолжаем со следующей пачкой.")
-            continue
-        
-        # Скачивание extracted_proxy для текущей пачки
-        print(f"\n--- Скачивание extracted_proxy для {current_project_name} ---")
-        extracted_proxy_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{current_project_name}/extracted_proxy")
-        batch_output_dir = os.path.join(project_output_dir, current_project_name)
-        os.makedirs(batch_output_dir, exist_ok=True)
-        extracted_proxy_local_path = os.path.join(batch_output_dir, "extracted_proxy")
-
-        download_file_sftp(
-            hostname=REMOTE_HOST,
-            username=REMOTE_USER,
-            password=AUTH_PASSWORD,
-            key_filepath=AUTH_KEY_FILEPATH,
-            remote_path=extracted_proxy_remote_path,
-            local_path=extracted_proxy_local_path
-        )
-
-        # Выполнение start_systemctl.sh для текущей пачки
-        print(f"\n--- Запуск start_systemctl.sh для {current_project_name} ---")
-        start_systemctl_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{current_project_name}/start_systemctl.sh")
-        start_systemctl_dir = os.path.dirname(start_systemctl_remote_path)
-        start_systemctl_name = os.path.basename(start_systemctl_remote_path)
-        stdout, stderr = run_remote_command(
-            hostname=REMOTE_HOST,
-            username=REMOTE_USER,
-            password=AUTH_PASSWORD,
-            key_filepath=AUTH_KEY_FILEPATH,
-            command=f"cd {start_systemctl_dir} && sudo bash {start_systemctl_name}",
-            sudo_password=SUDO_PASSWORD
-        )
-        if stderr:
-            print(f"Ошибка при запуске start_systemctl.sh для {current_project_name}. Продолжаем со следующей пачкой.")
-            continue
-
-        # Выполнение proxy_checker.sh для генерации файла результатов
-        print(f"\n--- Запуск proxy_checker.sh для {current_project_name} ---")
-        proxy_checker_script_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{current_project_name}/proxy_checker.sh")
-        proxy_checker_dir = os.path.dirname(proxy_checker_script_remote_path)
-        proxy_checker_name = os.path.basename(proxy_checker_script_remote_path)
-        stdout_checker_run, stderr_checker_run = run_remote_command(
-            hostname=REMOTE_HOST,
-            username=REMOTE_USER,
-            password=AUTH_PASSWORD,
-            key_filepath=AUTH_KEY_FILEPATH,
-            command=f"cd {proxy_checker_dir} && bash {proxy_checker_name}",
-            sudo_password=SUDO_PASSWORD
-        )
-
-        if stderr_checker_run:
-            print(f"Ошибка при запуске proxy_checker.sh для {current_project_name}. Продолжаем со следующей пачкой.")
-            continue
-        
-        # Скачиваем файл proxy_check_results.txt для текущей пачки
-        print(f"\n--- Скачивание proxy_check_results.txt для {current_project_name} ---")
-        proxy_results_remote_path = os.path.join(ACTUAL_CLONE_DIR, f"generated_proxy_configs/{current_project_name}/proxy_check_results.txt")
-        proxy_results_local_path = os.path.join(batch_output_dir, "proxy_check_results.txt")
-
-        download_file_sftp(
-            hostname=REMOTE_HOST,
-            username=REMOTE_USER,
-            password=AUTH_PASSWORD,
-            key_filepath=AUTH_KEY_FILEPATH,
-            remote_path=proxy_results_remote_path,
-            local_path=proxy_results_local_path
-        )
-        print(f"Результаты проверки прокси для {current_project_name} сохранены в: {proxy_results_local_path}")
-    
-    print(f"\n--- Все пачки обработаны. Результаты сохранены в папке: {project_output_dir} ---")
+if __name__=='__main__':
+    main()
