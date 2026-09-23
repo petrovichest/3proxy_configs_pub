@@ -6,6 +6,9 @@ import tempfile
 import unittest
 from unittest.mock import patch,Mock
 import subprocess
+import contextlib
+import io
+import remote_setup_script
 
 
 def load(name,path):
@@ -130,6 +133,26 @@ class CheckerTests(unittest.TestCase):
         for response in ('<html>OK</html>','192.0.2.1','2001:db8::4'):
             self.assertFalse(checker.validate_address(response,'2001:db8::3')[0])
         self.assertTrue(checker.validate_address('2001:0db8:0:0::3\n','2001:db8::3')[0])
+
+
+class RemoteCommandTests(unittest.TestCase):
+    def command(self,code):
+        channel=Mock()
+        channel.recv_ready.return_value=False
+        channel.recv_stderr_ready.side_effect=[True,False,False]
+        channel.recv_stderr.return_value=b'warning\n'
+        channel.exit_status_ready.return_value=True
+        channel.recv_exit_status.return_value=code
+        client=Mock()
+        client.get_transport.return_value.open_session.return_value=channel
+        with contextlib.redirect_stderr(io.StringIO()):
+            return remote_setup_script.run(client,['test-command'])
+
+    def test_warning_on_stderr_is_not_failure(self):
+        self.assertEqual(self.command(0),'')
+
+    def test_nonzero_exit_is_failure(self):
+        with self.assertRaises(subprocess.CalledProcessError):self.command(7)
 
 
 if __name__=='__main__':unittest.main()

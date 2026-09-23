@@ -75,6 +75,7 @@ def main():
     parser.add_argument('--repo-url',default='https://github.com/petrovichest/3proxy_configs_pub.git')
     parser.add_argument('--directory',default='/home/3proxy_configs_pub')
     parser.add_argument('--skip-install',action='store_true')
+    parser.add_argument('--skip-check',action='store_true',help='Skip the external IPv6 check (for an explicitly separate verification step)')
     parser.add_argument('--output-dir',type=Path,default=Path('downloaded_configs'))
     args=parser.parse_args()
     args.host=args.host or input('SSH host: ').strip()
@@ -106,9 +107,13 @@ def main():
         for project in summary['projects']:
             dest=local/project
             dest.mkdir(mode=0o700,exist_ok=True)
+            if not args.skip_check:
+                run(client,['venv/bin/python','4_proxy_checker.py','--project-name',project],args.directory)
             for name in ('extracted_proxy','proxy_configs'):
                 sftp.get(f'{args.directory}/generated_proxy_configs/{project}/{name}',str(dest/name))
                 (dest/name).chmod(0o600)
+            if not args.skip_check:
+                sftp.get(f'{args.directory}/generated_proxy_configs/{project}/proxy_check_results.txt',str(dest/'proxy_check_results.txt'))
             combined.extend((dest/'extracted_proxy').read_text().splitlines())
         (local/'extracted_proxy').write_text('\n'.join(combined)+'\n')
         (local/'extracted_proxy').chmod(0o600)
