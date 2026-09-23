@@ -191,6 +191,9 @@ venv/bin/python 4_proxy_checker.py --project-name capacity_1
 Проверка сравнивает ответ IPv6 API с назначенным адресом, возвращает ненулевой
 код при ошибках и пишет JSONL без паролей в `proxy_check_results.txt`.
 Для небольшой предварительной проверки доступен `--sample 10`.
+С другого компьютера можно проверить скачанные списки командой
+`python 4_proxy_checker.py --project-name capacity_1 --base-dir downloaded_configs/<host>`;
+так проверяется также доступность входящего IPv4-порта извне.
 
 ## Нагрузочные испытания через реальные API
 

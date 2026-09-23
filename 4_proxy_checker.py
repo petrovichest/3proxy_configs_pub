@@ -50,6 +50,8 @@ async def check_proxy(client,proxy,semaphore,url):
 async def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--project-name',required=True)
+    parser.add_argument('--base-dir',type=Path,default=Path(__file__).resolve().parent/'generated_proxy_configs',
+                        help='Project directories; may point to downloaded_configs/<host> for an external check')
     parser.add_argument('--concurrency',type=int,default=20)
     parser.add_argument('--output-file',default='proxy_check_results.txt')
     parser.add_argument('--check-url',default=CHECK_URL)
@@ -60,7 +62,7 @@ async def main():
         parser.error('Invalid concurrency/sample')
     if Path(args.project_name).name != args.project_name:
         parser.error('Invalid project name')
-    directory=Path(__file__).resolve().parent/'generated_proxy_configs'/args.project_name
+    directory=args.base_dir/args.project_name
     expected={}
     for line in (directory/'proxy_configs').read_text().splitlines():
         if line.strip():
