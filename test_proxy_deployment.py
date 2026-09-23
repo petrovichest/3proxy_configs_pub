@@ -101,6 +101,18 @@ class GenerationTests(unittest.TestCase):
         for path in self.base.glob('test_1/*.sh'):
             subprocess.run(['bash','-n',str(path)],check=True)
 
+    def test_allocator_tuning_preserves_mappings_and_is_repeatable(self):
+        self.generate(3)
+        project=self.base/'test_1'
+        original=(project/'full_proxy_config').read_bytes()
+        unit=project/'service.unit'
+        self.assertTrue(gen.configure_allocator(unit,2))
+        self.assertFalse(gen.configure_allocator(unit,2))
+        self.assertTrue(gen.configure_allocator(unit,4))
+        self.assertEqual(unit.read_text().count('MALLOC_ARENA_MAX='),1)
+        self.assertIn('Environment=MALLOC_ARENA_MAX=4',unit.read_text())
+        self.assertEqual((project/'full_proxy_config').read_bytes(),original)
+
 
 class BindingTests(unittest.TestCase):
     def test_repeated_bind_is_noop(self):

@@ -213,6 +213,20 @@ def network_preflight(interface, external_ipv4):
     return ports, [a for a in addresses if ':' in a]
 
 
+def configure_allocator(unit_path, arenas):
+    """Opt-in glibc arena limit; a repeated application does not restart a service."""
+    if arenas<=0:
+        raise ValueError('Malloc arena limit must be positive')
+    current=unit_path.read_text()
+    line=f'Environment=MALLOC_ARENA_MAX={arenas}\n'
+    updated=re.sub(r'^Environment=MALLOC_ARENA_MAX=\d+\n','',current,flags=re.M)
+    updated=updated.replace('[Service]\n','[Service]\n'+line,1)
+    if updated==current:
+        return False
+    atomic_write(unit_path,updated,0o644)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('num_proxies', type=int, nargs='?')
@@ -224,7 +238,10 @@ def main():
     parser.add_argument('--interface')
     parser.add_argument('--external-ipv4')
     parser.add_argument('--start', action='store_true')
+    parser.add_argument('--malloc-arenas',type=int,help='Opt-in glibc arena limit; restarts only services whose setting changes')
     args = parser.parse_args()
+    if args.malloc_arenas is not None and (args.malloc_arenas<=0 or not args.start):
+        parser.error('--malloc-arenas requires a positive count and --start')
     target = args.target_count is not None
     count = args.target_count if target else args.num_proxies
     if count is None:
@@ -254,7 +271,13 @@ def main():
         atomic_write(sysctl_file, f'kernel.threads-max = {desired}\n', 0o644)
         subprocess.run(['sysctl','-p',str(sysctl_file)], check=True)
         for name in names:
+            restart=False
+            unit=f'3proxy-{name}.service'
+            if args.malloc_arenas is not None and configure_allocator(BASE_OUTPUT_DIR/name/'service.unit',args.malloc_arenas):
+                restart=subprocess.run(['systemctl','is-active','--quiet',unit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
             subprocess.run(['bash',str(BASE_OUTPUT_DIR/name/'start_systemctl.sh')], check=True)
+            if restart:
+                subprocess.run(['systemctl','restart',unit],check=True)
     print(json.dumps({'projects':names,'total':count}), flush=True)
 
 
