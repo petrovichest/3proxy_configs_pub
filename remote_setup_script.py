@@ -87,6 +87,10 @@ def main():
     os.umask(0o077)
     client=connect(args.host,args.user,args.key,getpass.getpass('SSH password: ') if args.password else None)
     try:
+        if not args.skip_install:
+            run(client,['bash','-c','if ! command -v git >/dev/null 2>&1; then '
+                        'export DEBIAN_FRONTEND=noninteractive; '
+                        'apt-get update -q && apt-get install -y git ca-certificates; fi'])
         sftp=client.open_sftp()
         try:
             sftp.stat(args.directory+'/.git')
