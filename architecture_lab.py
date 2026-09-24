@@ -94,6 +94,20 @@ def restore():
     require_test_host()
     snapshot = json.loads((LAB / 'original.json').read_text())
     stop_trials()
+    archive = LAB / 'original-installation'
+    if (archive / 'generated_proxy_configs').exists():
+        if (ROOT / 'generated_proxy_configs').exists() or (ROOT / 'deployment.json').exists():
+            raise RuntimeError('Preserve and remove the new installation manually before restoring the original pool')
+        shutil.move(str(archive / 'generated_proxy_configs'), ROOT / 'generated_proxy_configs')
+        for path in (archive / 'units').glob('*'):
+            target = Path('/etc/systemd/system') / path.name
+            if target.exists():
+                raise RuntimeError('An original unit path is occupied')
+            shutil.move(str(path), target)
+        subprocess.run(['systemctl', 'daemon-reload'], check=True)
+        for unit in snapshot['units']:
+            if unit['enabled'] == 'enabled':
+                subprocess.run(['systemctl', 'enable', unit['name']], check=True)
     if file_hashes() != snapshot['hashes']:
         raise RuntimeError('Original files changed; refusing to overwrite them automatically')
     for unit in snapshot['units']:
@@ -102,6 +116,42 @@ def restore():
         if command('systemctl', 'is-enabled', unit['name']) != unit['enabled']:
             raise RuntimeError('Original enablement changed')
     print(json.dumps({'restored': True, 'units': len(snapshot['units']), 'hashes_unchanged': True}))
+
+
+def archive_original():
+    """Explicit lab maintenance before testing the installer on this same host."""
+    require_test_host()
+    snapshot = json.loads((LAB / 'original.json').read_text())
+    archive = LAB / 'original-installation'
+    if archive.exists() or (ROOT / 'deployment.json').exists():
+        raise RuntimeError('An archive or new deployment record already exists')
+    if file_hashes() != snapshot['hashes']:
+        raise RuntimeError('Original configuration hashes changed')
+    sockets = command('ss', '-H', '-nt', 'state', 'established')
+    if any(ip + ':' in sockets for ip in ('72.56.71.143', '5.9.117.153')):
+        raise RuntimeError('A parser or load generator still has an established connection')
+    unit_paths = []
+    for unit in snapshot['units']:
+        path = Path(command('systemctl', 'show', unit['name'], '--property=FragmentPath', '--value'))
+        dropins = command('systemctl', 'show', unit['name'], '--property=DropInPaths', '--value')
+        if path != Path('/etc/systemd/system') / unit['name'] or dropins:
+            raise RuntimeError('Unexpected unit path or drop-ins; manual inspection is required')
+        unit_paths.append(path)
+    (archive / 'units').mkdir(mode=0o700, parents=True)
+    write_json(archive / 'archive.json', {'time': time.time(), 'state': 'archiving', 'units': snapshot['units']})
+    stop_trials()
+    subprocess.run(['systemctl', 'disable', '--now', *[u['name'] for u in snapshot['units']]], check=True)
+    interface = json.loads(command('ip', '-j', 'route', 'show', 'default'))[0]['dev']
+    for unit in snapshot['units']:
+        project = unit['name'].removeprefix('3proxy-').removesuffix('.service')
+        subprocess.run([str(ROOT / 'venv/bin/python'), str(ROOT / '2_bind_ipv6_addresses.py'),
+                        project, '--interface', interface, '--action', 'del_all'], check=True)
+    shutil.move(str(ROOT / 'generated_proxy_configs'), archive / 'generated_proxy_configs')
+    for path in unit_paths:
+        shutil.move(str(path), archive / 'units' / path.name)
+    subprocess.run(['systemctl', 'daemon-reload'], check=True)
+    write_json(archive / 'archive.json', {'time': time.time(), 'state': 'archived', 'units': snapshot['units']})
+    print(json.dumps({'archived': True, 'original_proxies': 9000, 'backup': str(archive)}))
 
 
 def install_gost():
@@ -275,7 +325,7 @@ def monitor(duration, interval, unit='proxy-lab.slice'):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'restore', 'render', 'start', 'stop', 'monitor'))
+    parser.add_argument('action', choices=('prepare', 'restore', 'archive', 'render', 'start', 'stop', 'monitor'))
     parser.add_argument('--engine', choices=('ports', 'shared', 'gost'))
     parser.add_argument('--count', type=int, default=3000)
     parser.add_argument('--processes', type=int, default=1)
@@ -289,7 +339,7 @@ def main():
         monitor(args.duration, args.interval, args.unit)
     else:
         require_test_host()
-        {'prepare': prepare, 'restore': restore, 'start': start, 'stop': stop_trials}[args.action]()
+        {'prepare': prepare, 'restore': restore, 'archive': archive_original, 'start': start, 'stop': stop_trials}[args.action]()
 
 
 if __name__ == '__main__':

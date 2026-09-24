@@ -146,6 +146,8 @@ class GenerationTests(unittest.TestCase):
             self.generate(3001)
 
     def test_shared_pool_rejects_partial_state_and_insufficient_subnets(self):
+        with self.assertRaisesRegex(ValueError, 'reserved'):
+            gen.generate_shared_pool(3, 'logrotate', '2001:db8:1234::/48', 'net0', '192.0.2.1')
         with self.assertRaisesRegex(ValueError, '65536'):
             gen.generate_shared_pool(65537, 'shared', '2001:db8:1234::/48', 'net0', '192.0.2.1')
         self.assertFalse(self.base.exists())

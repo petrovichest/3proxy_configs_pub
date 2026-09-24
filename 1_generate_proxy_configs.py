@@ -149,6 +149,8 @@ def generate_shared_pool(count, project, ipv6_subnet, interface, external_ipv4, 
                          reserved_ports=(), reserved_addresses=()):
     """Create exactly one shared listener; credentials select fixed outgoing IPv6s."""
     logging_block(project)
+    if project == 'logrotate':
+        raise ValueError('Project name logrotate is reserved for the logging service')
     network = ipaddress.IPv6Network(ipv6_subnet, strict=True)
     ipaddress.IPv4Address(external_ipv4)
     if count <= 0 or network.prefixlen not in (48, 64):
@@ -157,8 +159,8 @@ def generate_shared_pool(count, project, ipv6_subnet, interface, external_ipv4, 
         raise ValueError('A /48 contains only 65536 distinct /64 prefixes')
     if not re.fullmatch(r'[A-Za-z0-9_.:-]+', interface):
         raise ValueError('Invalid network interface')
-    if any(c.isspace() for c in str(BASE_OUTPUT_DIR)):
-        raise ValueError('Installation path must not contain whitespace')
+    if not re.fullmatch(r'(?:/[A-Za-z0-9_.-]+)+', str(BASE_OUTPUT_DIR)):
+        raise ValueError('Installation path must contain only letters, digits, slash, dot, underscore or hyphen')
     occupied = set(reserved_ports)
     port = next((p for p in range(DEFAULT_START_PORT, DEFAULT_END_PORT + 1) if p not in occupied), None)
     if port is None:
