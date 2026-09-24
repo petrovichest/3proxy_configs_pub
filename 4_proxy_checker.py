@@ -20,7 +20,8 @@ def parse_proxy_line(line):
         raise ValueError('Invalid proxy record')
     ip,port,user,password=match.groups()
     ipaddress.IPv4Address(ip)
-    return dict(endpoint=f'{ip}:{port}',url=f'http://{quote(user,safe="")}:{quote(password,safe="")}@{ip}:{port}')
+    return dict(endpoint=f'{ip}:{port}', user=user,
+                url=f'http://{quote(user,safe="")}:{quote(password,safe="")}@{ip}:{port}')
 
 
 def validate_address(text,expected):
@@ -37,14 +38,34 @@ def validate_address(text,expected):
 
 async def check_proxy(client,proxy,semaphore,url):
     async with semaphore:
+        identity = dict(endpoint=proxy['endpoint'], user=proxy['user'])
         try:
             async with client.get(url,proxy=proxy['url'],allow_redirects=False) as response:
                 if response.status!=200:
-                    return dict(endpoint=proxy['endpoint'],ok=False,error=f'HTTP {response.status}')
+                    return dict(**identity,ok=False,error=f'HTTP {response.status}')
                 valid,detail=validate_address(await response.text(),proxy['expected'])
-                return dict(endpoint=proxy['endpoint'],ok=valid,**({'ipv6':detail} if valid else {'error':detail}))
+                return dict(**identity,ok=valid,**({'ipv6':detail} if valid else {'error':detail}))
         except (aiohttp.ClientError,asyncio.TimeoutError) as exc:
-            return dict(endpoint=proxy['endpoint'],ok=False,error=type(exc).__name__)
+            return dict(**identity,ok=False,error=type(exc).__name__)
+
+
+def load_proxies(directory):
+    expected = {}
+    for line in (directory/'proxy_configs').read_text().splitlines():
+        if not line.strip():
+            continue
+        row = dict(x.split(':', 1) for x in line.split())
+        key = (row['proxy_ip'] + ':' + row['proxy_port'], row['user'])
+        if key in expected:
+            raise ValueError('Duplicate logical proxy identity')
+        expected[key] = str(ipaddress.IPv6Interface(row['ipv6']).ip)
+    proxies = [parse_proxy_line(line) for line in (directory/'extracted_proxy').read_text().splitlines() if line.strip()]
+    keys = [(p['endpoint'], p['user']) for p in proxies]
+    if not proxies or len(set(keys)) != len(keys) or set(keys) != set(expected):
+        raise ValueError('Missing or inconsistent proxy records')
+    for proxy in proxies:
+        proxy['expected'] = expected[(proxy['endpoint'], proxy['user'])]
+    return proxies
 
 
 async def main():
@@ -63,16 +84,7 @@ async def main():
     if Path(args.project_name).name != args.project_name:
         parser.error('Invalid project name')
     directory=args.base_dir/args.project_name
-    expected={}
-    for line in (directory/'proxy_configs').read_text().splitlines():
-        if line.strip():
-            r=dict(x.split(':',1) for x in line.split())
-            expected[r['proxy_ip']+':'+r['proxy_port']]=str(ipaddress.IPv6Interface(r['ipv6']).ip)
-    proxies=[parse_proxy_line(l) for l in (directory/'extracted_proxy').read_text().splitlines() if l.strip()]
-    if not proxies or len(proxies)!=len(expected):
-        raise ValueError('Missing or inconsistent proxy records')
-    for p in proxies:
-        p['expected']=expected[p['endpoint']]
+    proxies=load_proxies(directory)
     if args.sample and args.sample<len(proxies):
         proxies=[proxies[i*len(proxies)//args.sample] for i in range(args.sample)]
     semaphore=asyncio.Semaphore(args.concurrency)

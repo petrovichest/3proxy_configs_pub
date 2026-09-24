@@ -164,6 +164,19 @@ class BindingTests(unittest.TestCase):
 
 
 class CheckerTests(unittest.TestCase):
+    def test_shared_endpoint_keeps_users_and_expected_addresses_separate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / 'proxy_configs').write_text(
+                'user:a pass:secret proxy_ip:192.0.2.1 proxy_port:10000 ipv6:2001:db8::3/64\n'
+                'user:b pass:secret proxy_ip:192.0.2.1 proxy_port:10000 ipv6:2001:db8::4/64\n')
+            (directory / 'extracted_proxy').write_text('192.0.2.1:10000@a:secret\n192.0.2.1:10000@b:secret\n')
+            proxies = checker.load_proxies(directory)
+            self.assertEqual([p['expected'] for p in proxies], ['2001:db8::3', '2001:db8::4'])
+            (directory / 'extracted_proxy').write_text('192.0.2.1:10000@a:secret\n192.0.2.1:10000@a:secret\n')
+            with self.assertRaisesRegex(ValueError, 'inconsistent'):
+                checker.load_proxies(directory)
+
     def test_html_ipv4_and_wrong_ipv6_are_failures(self):
         for response in ('<html>OK</html>','192.0.2.1','2001:db8::4'):
             self.assertFalse(checker.validate_address(response,'2001:db8::3')[0])
