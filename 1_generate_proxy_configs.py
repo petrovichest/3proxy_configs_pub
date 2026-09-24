@@ -97,11 +97,46 @@ def inspect_projects():
     return projects, endpoints, addresses
 
 
+def dns_config(resolv_conf=Path('/etc/resolv.conf')):
+    """Use 3proxy's resolver/cache without libc enumerating every bound IPv6."""
+    servers=[]
+    for line in resolv_conf.read_text().splitlines():
+        parts=line.split('#',1)[0].split()
+        if len(parts)<2 or parts[0]!='nameserver':
+            continue
+        address=ipaddress.ip_address(parts[1])
+        if '%' in str(address):
+            raise ValueError('Scoped DNS resolver addresses are not supported')
+        value=f'[{address}]' if address.version==6 else str(address)
+        if value not in servers:servers.append(value)
+    if not servers:
+        raise ValueError('No DNS nameservers in resolv.conf')
+    return ''.join(f'nserver {address}\n' for address in servers[:5])
+
+
+def refresh_shared_dns(project):
+    """Explicit maintenance: preserve users, addresses, ports and resource limits."""
+    logging_block(project)
+    directory=BASE_OUTPUT_DIR/project
+    if not (directory/'pool.json').is_file():
+        raise ValueError('DNS refresh requires an existing shared pool')
+    with (BASE_OUTPUT_DIR/'.allocation.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        path=directory/'full_proxy_config'
+        old=path.read_text()
+        new=dns_config()+''.join(line for line in old.splitlines(keepends=True) if line.split()[:1]!=['nserver'])
+        if old==new:return False
+        backup=directory/'full_proxy_config.before-dns'
+        if not backup.exists():atomic_write(backup,old)
+        atomic_write(path,new)
+    return True
+
+
 def render_project(directory, project, records, interface, *, shared=False):
     root = BASE_OUTPUT_DIR.parent
     user, password = records[0]['user'], records[0]['pass']
-    config = (f'maxconn {16000 if shared else 10000}\n'
-              f'{"nscache6" if shared else "nscache"} 65536\n'
+    caches='nscache6 65536\n' if shared else 'nscache 65536\nnscache6 65536\n'
+    config = (dns_config() + f'maxconn {16000 if shared else 10000}\n' + caches +
               'timeouts 1 5 30 60 180 1800 15 60\n'
               'setgid 65535\nsetuid 65535\nflush\nauth strong\n')
     if shared:
@@ -303,8 +338,13 @@ def main():
     parser.add_argument('--interface')
     parser.add_argument('--external-ipv4')
     parser.add_argument('--start', action='store_true')
+    parser.add_argument('--refresh-dns',metavar='PROJECT',help='Refresh an existing shared pool DNS config; restart its service separately')
     parser.add_argument('--malloc-arenas',type=int,help='Opt-in glibc arena limit (0 restores default); restarts changed services')
     args = parser.parse_args()
+    if args.refresh_dns:
+        if args.start:parser.error('--refresh-dns does not start services')
+        print(json.dumps({'project':args.refresh_dns,'dns_changed':refresh_shared_dns(args.refresh_dns)}))
+        return
     if args.malloc_arenas is not None and (args.malloc_arenas<0 or not args.start):
         parser.error('--malloc-arenas requires a nonnegative count and --start')
     target = args.target_count is not None

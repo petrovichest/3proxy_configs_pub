@@ -74,19 +74,20 @@ def ws_restriction(decoded):
     return None
 
 
-def valid_ws_quote(decoded,client):
+def valid_ws_quote(decoded,client,subscription=None):
     """Validate the requested quote without formatting unused transaction routes."""
     try:
         quotes=decoded.get('StreamData',{}).get('payload',{}).get('SwapQuotes',{}).get('quotes',{})
     except (AttributeError,TypeError):return False
     if not isinstance(quotes,dict):return False
+    subscription=subscription or {'amount':50_000_000,'input_mint':client.INPUT_MINT_USDT,'output_mint':client.INPUT_MINT_SOL}
     for row in quotes.values():
         if not isinstance(row,dict) or row.get('error'):continue
         try:
-            if int(row.get('inAmount',0))!=50_000_000 or int(row.get('outAmount',0))<=0:continue
+            if int(row.get('inAmount',0))!=subscription['amount'] or int(row.get('outAmount',0))<=0:continue
         except (TypeError,ValueError):continue
         if any(row.get(key) and client._safe_str(row[key])!=expected for key,expected in
-               [('inputMint',client.INPUT_MINT_USDT),('outputMint',client.INPUT_MINT_SOL)]):continue
+               [('inputMint',subscription['input_mint']),('outputMint',subscription['output_mint'])]):continue
         return True
     return False
 
@@ -117,6 +118,11 @@ class Stage:
         self.started=time.monotonic()
         self.measuring=False
         self.run_id=hashlib.sha256(os.urandom(32)).hexdigest()
+        self.manifest=json.loads(args.workload_manifest.read_text()) if getattr(args,'workload_manifest',None) else None
+        self.http_jobs=[]
+        self.http_seen=set()
+        self.http_sizes=deque(maxlen=200000)
+        self.ws_sizes=deque(maxlen=200000)
 
     def halt(self,reason):
         if not self.stop.is_set():
@@ -202,7 +208,7 @@ class Stage:
     async def prepare(self):
         from curl_cffi.requests import AsyncSession
         from curl_cffi.const import CurlMOpt
-        self.session=AsyncSession(impersonate='chrome',trust_env=False,max_clients=max(256,2*len(self.proxies)),timeout=15)
+        self.session=AsyncSession(impersonate='chrome',trust_env=False,max_clients=256,timeout=15)
         self.session.acurl.setopt(CurlMOpt.MAXCONNECTS,2*len(self.proxies))
         if self.rps:
             from dotenv import dotenv_values
@@ -211,14 +217,29 @@ class Stage:
             values=dotenv_values(self.args.parser_root/'.env')
             key=values.get('DEFILLAMA_API_KEY') or os.getenv('DEFILLAMA_API_KEY')
             if not key:raise ValueError('DEFILLAMA_API_KEY is missing')
-            self.config=LlamaBaseConfig(api_key=key)
-            self.llama=LlamaBaseParser(self.config,None,[p['url'] for p in self.proxies])
+            if self.manifest:
+                from decimal import Decimal
+                from jup_async_parser.parsers.llama_robinhood_parser import LlamaRobinhoodConfig,LlamaRobinhoodParser
+                settings=dict(self.manifest['http']['config'])
+                for name in ('notional','buy_notional'):settings[name]=Decimal(settings[name])
+                self.config=LlamaRobinhoodConfig(api_key=key,**settings)
+                self.llama=LlamaRobinhoodParser(self.config,None,[p['url'] for p in self.proxies])
+                # At low load, retain the production cadence on a subset of tokens.
+                count=min(len(self.manifest['http']['tokens']),max(1,math.ceil(self.rps/(2*self.config.quote_hz))))
+                for token in self.manifest['http']['tokens'][:count]:
+                    state=TokenState(address=token['address'],symbol=token['symbol'],decimals=token['decimals'],
+                                     buy_amount=token['buy_amount'],buy_at=time.monotonic())
+                    self.http_jobs.extend([(state,'buy'),(state,'sell')])
+            else:
+                self.config=LlamaBaseConfig(api_key=key)
+                self.llama=LlamaBaseParser(self.config,None,[p['url'] for p in self.proxies])
             self.llama.decimals[self.config.quote_address]=6
             # One initialization request, never part of the benchmark hot path.
             await self.llama.refresh_gas()
             if not self.llama.gas_price:raise RuntimeError('Gas price initialization failed')
-            state=TokenState(address=self.config.native_address,symbol='ETH',decimals=18)
-            self.request=self.llama.request_data(state,'buy')
+            if not self.manifest:
+                state=TokenState(address=self.config.native_address,symbol='ETH',decimals=18)
+                self.request=self.llama.request_data(state,'buy')
         if self.ws_count:
             from jup_async_parser.api_clients.titan_client import TitanAPIClient
             from jup_async_parser.config import JupParserConfig
@@ -228,27 +249,36 @@ class Stage:
             self.bridge=TitanNodeWebSocketTransport()
             await self.bridge.start()
 
-    async def http_request(self,proxy):
+    async def http_request(self,proxy,index=0):
         from jup_async_parser.parsers.llama_robinhood_parser import QUOTE_URL,HEADERS,normalize_quote
         started=time.monotonic()
         ok=False
         try:
-            params,body,source,destination,amount=self.request
+            state,side=self.http_jobs[index%len(self.http_jobs)] if self.http_jobs else (None,'buy')
+            request=self.llama.request_data(state,side) if state else self.request
+            if request is None:
+                self.counts['http_not_ready']+=1
+                return
+            params,body,source,destination,amount=request
             response=await self.session.post(QUOTE_URL,params=params,data=json.dumps(body,separators=(',',':')),
-                headers=HEADERS,proxy=proxy['url'],allow_redirects=False,timeout=5,discard_cookies=True)
+                headers=HEADERS,proxy=proxy['url'],allow_redirects=False,timeout=self.config.timeout,discard_cookies=True)
             self.counts['http_'+str(response.status_code)]+=1
             self.status(response.status_code)
             if response.headers.get('cf-mitigated')=='challenge':self.halt('api_challenge')
             if response.status_code==200:
                 data=response.json()
                 if data.get('error') and re.search(r'429|rate.?limit|too many',str(data['error']),re.I):self.halt('api_upstream_rate_limit')
-                normalize_quote(data,source,destination,amount,'buy',time.time(),time.monotonic()-started,
+                _,amount_out=normalize_quote(data,source,destination,amount,side,time.time(),time.monotonic()-started,
                     chain_id=self.config.chain_id,network=self.config.network,quote_address=self.config.quote_address,quote_symbol=self.config.quote_symbol)
                 ok=True
+                if state and side=='buy':state.buy_amount=amount_out;state.buy_at=time.monotonic()
                 if self.measuring:
                     self.counts['http_valid']+=1
+                    self.counts['http_valid_'+side]+=1
+                    self.http_seen.add((source['address'],destination['address']))
                     self.latencies.append((time.monotonic()-started)*1000)
             self.counts['bytes_received']+=len(response.content)
+            if self.measuring:self.http_sizes.append(len(response.content))
         except asyncio.CancelledError:raise
         except Exception as exc:
             self.counts['http_error_'+type(exc).__name__]+=1
@@ -268,7 +298,7 @@ class Stage:
                 self.counts['missed_schedule']+=1
                 index=max(index,int((time.monotonic()-origin)*self.rps))
             proxy=self.proxies[index%len(self.proxies)]
-            task=asyncio.create_task(self.http_request(proxy))
+            task=asyncio.create_task(self.http_request(proxy,index))
             self.pending.add(task);task.add_done_callback(self.pending.discard)
             index+=1
 
@@ -298,7 +328,9 @@ class Stage:
         proxy=self.proxies[index%len(self.proxies)]
         identity_bytes=hashlib.sha256(f'{self.run_id}:{index}'.encode()).digest()
         identity=base58.b58encode(identity_bytes).decode()
-        ws=None;ping=None;established=False
+        subscription=self.manifest['ws'][index] if self.manifest else {
+            'input_mint':self.titan.INPUT_MINT_USDT,'output_mint':self.titan.INPUT_MINT_SOL,'amount':50_000_000,'side':'buy'}
+        ws=None;ping=None;established=False;phase='auth'
         try:
             response=await self.auth_session.get('https://titan.exchange/api/apollo-jwt',params={'address':identity},
                 headers=self.titan.AUTH_HEADERS,proxy=proxy['url'],allow_redirects=False,timeout=15)
@@ -310,25 +342,31 @@ class Stage:
             if not token:raise RuntimeError('Missing authentication token')
             headers=dict(self.titan.WS_HEADERS)
             headers.update({'Accept-Language':'en-US,en;q=0.9','User-Agent':'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'})
+            phase='upgrade'
             ws=await self.bridge.connect(url=self.titan.WS_URL_BASE+'?auth='+token,proxy=proxy['raw'],headers=headers,subprotocols=['v1.api.titan.ag+gzip'])
             self.ws_active+=1
             self.counts['ws_opened']+=1
-            await ws.send(self.titan.create_subscription_payload(self.titan.INPUT_MINT_SOL,amount=50_000_000,req_id=1,user_public_key_bytes=identity_bytes))
+            await ws.send(self.titan.create_subscription_payload(subscription['output_mint'],input_mint=subscription['input_mint'],
+                amount=subscription['amount'],req_id=1,user_public_key_bytes=identity_bytes))
             async def heartbeat():
                 while not self.stop.is_set():
                     await asyncio.sleep(15)
                     await ws.send(json.dumps({'type':'PING'}))
             ping=asyncio.create_task(heartbeat())
             first_deadline=time.monotonic()+20
+            phase='receive'
             while not self.stop.is_set():
                 message=await asyncio.wait_for(ws.recv(),20)
+                if self.measuring:
+                    self.ws_sizes.append(len(message))
+                    self.counts['ws_bytes_received']+=len(message)
                 decoded=self.titan.decode_message(message)
                 if decoded:
                     restriction=ws_restriction(decoded)
                     if restriction:
                         self.counts['ws_restriction_'+restriction]+=1
                         self.halt('api_ws_restriction');break
-                    if valid_ws_quote(decoded,self.titan):
+                    if valid_ws_quote(decoded,self.titan,subscription):
                         established=True
                         now=time.monotonic()
                         if index in self.ws_last and self.measuring:
@@ -337,12 +375,17 @@ class Stage:
                             self.counts['ws_gap_max_ms']=max(self.counts['ws_gap_max_ms'],round(gap,3))
                         self.ws_last[index]=now
                         self.ws_valid.add(index)
-                        if self.measuring:self.counts['ws_valid_messages']+=1
+                        if self.measuring:
+                            self.counts['ws_valid_messages']+=1
+                            self.counts['ws_valid_messages_'+subscription['side']]+=1
                 if index not in self.ws_valid and time.monotonic()>first_deadline:
+                    self.counts['ws_no_quote_index']=index
                     self.halt('ws_no_valid_quote');break
         except asyncio.CancelledError:raise
         except Exception as exc:
             self.counts['ws_error_'+type(exc).__name__]+=1
+            self.counts['ws_error_phase_'+phase]+=1
+            if established:self.counts['ws_failed_after_valid_quote']+=1
             # The existing transport exposes only a short code, never its URL/token.
             code=re.fullmatch(r'Titan Node WebSocket (?:open failed: )?([A-Za-z0-9_]+)',str(exc))
             if code:self.counts['ws_code_'+code.group(1)]+=1
@@ -404,6 +447,12 @@ class Stage:
             'http_latency_ms':{p:percentile(self.latencies,f) for p,f in [('p50',.5),('p95',.95),('p99',.99)]},
             'ws_gap_ms':{p:percentile(self.gaps,f) for p,f in [('p50',.5),('p95',.95),('p99',.99)]},
             'ws_valid_connections':len(self.ws_valid),'counts':dict(self.counts),
+            'workload':'production_snapshot' if self.manifest else 'single_pair_smoke',
+            'http_directions_validated':len(self.http_seen),
+            'http_response_bytes':{p:percentile(self.http_sizes,f) for p,f in [('p50',.5),('p95',.95),('p99',.99)]},
+            'ws_message_bytes':{p:percentile(self.ws_sizes,f) for p,f in [('p50',.5),('p95',.95),('p99',.99)]},
+            'cpu_mean':sum(s.get('cpu_percent',0) for s in self.samples)/max(1,len(self.samples)),
+            'cgroup_memory_max':max((sum(int(p.get('memory.current',0)) for p in s['services']) for s in self.samples),default=None),
             'cpu_max':max((s.get('cpu_percent',0) for s in self.samples),default=None),
             'memory_available_min':min((s['memory_available'] for s in self.samples),default=None),
             'threads_max':max((sum(p['threads'] for p in s['services']) for s in self.samples),default=None),
@@ -422,6 +471,7 @@ async def main():
     parser.add_argument('--remote-directory',default='/home/3proxy_configs_pub')
     parser.add_argument('--parser-root',type=Path,required=True)
     parser.add_argument('--proxy-file',type=Path,required=True)
+    parser.add_argument('--workload-manifest',type=Path,help='Private production snapshot: Robinhood config/tokens and exact Titan buy/sell subscriptions')
     parser.add_argument('--profile',choices=['http','ws','mixed'],required=True)
     parser.add_argument('--rps',type=float,default=10)
     parser.add_argument('--connections',type=int,default=100)
@@ -453,9 +503,16 @@ async def main():
     if args.limit_proxies:proxies=proxies[:args.limit_proxies]
     rps=args.rps if args.profile!='ws' else 0
     connections=args.connections if args.profile!='http' else 0
+    if args.workload_manifest:
+        manifest=json.loads(args.workload_manifest.read_text())
+        if manifest.get('schema_version')!=1 or not manifest.get('http',{}).get('tokens') or not manifest.get('ws'):
+            parser.error('Invalid workload snapshot')
+        if connections>len(manifest['ws']):parser.error('Requested more WebSockets than captured subscriptions')
     baseline=args.baseline_p95_ms
     ws_baseline=args.baseline_ws_p95_ms
     while True:
+        if args.workload_manifest and connections>len(manifest['ws']):
+            print(json.dumps({'event':'profile_limit','reason':'captured_subscription_count'}),flush=True);break
         if rps>len(proxies):
             print(json.dumps({'event':'profile_limit','reason':'one_http_request_per_proxy_per_second'}),flush=True);break
         stage=Stage(args,proxies,rps,connections,baseline,ws_baseline)

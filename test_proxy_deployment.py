@@ -35,6 +35,27 @@ class GenerationTests(unittest.TestCase):
     def generate(self,n,**kw):
         return gen.generate_proxy_configs(n,'test','2001:db8:1234::/48','net0','192.0.2.1',target=True,batch_size=3,**kw)
 
+    def test_dns_uses_configured_literal_resolvers_without_duplicates(self):
+        source=Path(self.temp.name)/'resolv.conf'
+        source.write_text('search example.org\nnameserver 127.0.0.53 # stub\nnameserver 2001:db8::53\nnameserver 127.0.0.53\n')
+        self.assertEqual(gen.dns_config(source),'nserver 127.0.0.53\nnserver [2001:db8::53]\n')
+        source.write_text('search example.org\n')
+        with self.assertRaises(ValueError):gen.dns_config(source)
+
+    def test_dns_maintenance_preserves_pool_credentials_and_unit_and_is_idempotent(self):
+        gen.generate_shared_pool(3,'pool','2001:db8:1234::/48','net0','192.0.2.1')
+        directory=self.base/'pool'
+        config=directory/'full_proxy_config'
+        old=''.join(l for l in config.read_text().splitlines(keepends=True) if not l.startswith('nserver '))
+        config.write_text(old)
+        others={p.name:p.read_bytes() for p in directory.iterdir() if p!=config}
+        with patch.object(gen,'dns_config',return_value='nserver 127.0.0.53\n'):
+            self.assertTrue(gen.refresh_shared_dns('pool'))
+            self.assertFalse(gen.refresh_shared_dns('pool'))
+        self.assertEqual(config.read_text(),'nserver 127.0.0.53\n'+old)
+        self.assertEqual((directory/'full_proxy_config.before-dns').read_text(),old)
+        for name,content in others.items():self.assertEqual((directory/name).read_bytes(),content)
+
     def test_growth_preserves_every_existing_byte(self):
         self.generate(5)
         snapshot={p.relative_to(self.base):p.read_bytes() for p in self.base.glob('test_*/*')}

@@ -102,5 +102,17 @@ class LoadGuardTests(unittest.TestCase):
             row.clear();row.update(original)
         self.assertFalse(valid_ws_quote({'StreamData':None},client))
 
+    def test_captured_sell_subscription_validates_its_actual_amount_and_direction(self):
+        client=SimpleNamespace(INPUT_MINT_USDT='USDT',INPUT_MINT_SOL='SOL',_safe_str=str)
+        subscription={'input_mint':'TOKEN','output_mint':'USDT','amount':5054493975}
+        row={'inputMint':'TOKEN','outputMint':'USDT','inAmount':'5054493975','outAmount':'49426802'}
+        message={'StreamData':{'payload':{'SwapQuotes':{'quotes':{'Titan':row}}}}}
+        self.assertTrue(valid_ws_quote(message,client,subscription))
+        self.assertFalse(valid_ws_quote(message,client))
+        row['inAmount']='50000000'
+        self.assertFalse(valid_ws_quote(message,client,subscription))
+        row.update(inAmount='5054493975',outputMint='SOL')
+        self.assertFalse(valid_ws_quote(message,client,subscription))
+
 
 if __name__=='__main__':unittest.main()
