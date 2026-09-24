@@ -22,8 +22,9 @@ ROOT = Path(__file__).resolve().parent
 LAB = ROOT / 'capacity_results' / 'architecture'
 FIXTURE_IPV4 = '5.9.117.153'
 FIXTURE_IPV6 = '2a01:4f8:162:62a8::2'
-FIXTURE_HTTP = 38080
-FIXTURE_HTTPS = 38443
+# Stay below the ephemeral client port range on the generator host.
+FIXTURE_HTTP = 18080
+FIXTURE_HTTPS = 18443
 
 
 def proxy_url(row):
