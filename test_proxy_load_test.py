@@ -3,11 +3,44 @@ from collections import Counter
 from types import SimpleNamespace
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from proxy_load_test import resource_stop,parse_proxy,percentile,Stage,ws_restriction,valid_ws_quote
 
 
 class LoadGuardTests(unittest.TestCase):
+    def test_single_established_ws_reset_can_reconnect_but_error_burst_stops(self):
+        stage=Stage(SimpleNamespace(),[{'endpoint':'192.0.2.1:10000'}],0,375)
+        for index in range(3):self.assertTrue(stage.ws_failure(index,'1006',True,True))
+        self.assertFalse(stage.ws_failure(3,'1006',True,True))
+        self.assertEqual(stage.reason,'ws_error_rate')
+
+    def test_ws_reconnect_never_retries_api_limits_or_repeated_failures(self):
+        for code,reconnect,established in [('429',True,True),('1008',True,True),('1006',False,True),('1006',True,False)]:
+            stage=Stage(SimpleNamespace(),[{'endpoint':'192.0.2.1:10000'}],0,375)
+            self.assertFalse(stage.ws_failure(0,code,reconnect,established))
+            self.assertTrue(stage.stop.is_set())
+
+    def test_ws_error_window_excludes_old_failures(self):
+        stage=Stage(SimpleNamespace(),[{'endpoint':'192.0.2.1:10000'}],0,375)
+        stage.ws_failures.extend([time.monotonic()-61]*4)
+        self.assertTrue(stage.ws_failure(0,'1006',True,True))
+        self.assertEqual(len(stage.ws_failures),1)
+
+    def test_ws_reconnect_keeps_the_same_slot_and_is_attempted_once(self):
+        async def run():
+            stage=Stage(SimpleNamespace(),[{'endpoint':'192.0.2.1:10000'}],0,375)
+            calls=[]
+            async def once(index,can_reconnect):
+                calls.append((index,can_reconnect))
+                return True
+            async def wait(seconds):pass
+            stage.websocket_once=once;stage.wait=wait
+            await stage.websocket(17)
+            self.assertEqual(calls,[(17,True),(17,False)])
+            self.assertEqual(stage.counts['ws_reconnects'],1)
+        asyncio.run(run())
+
     def test_interrupted_measurement_retains_elapsed_time(self):
         async def run(directory):
             stage=Stage(SimpleNamespace(output=Path(directory)/'result.jsonl',host='192.0.2.1',

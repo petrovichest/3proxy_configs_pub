@@ -108,6 +108,7 @@ class Stage:
         self.ws_active=0
         self.ws_valid=set()
         self.ws_last={}
+        self.ws_failures=deque()
         self.bridge=None
         self.session=None
         self.auth_session=None
@@ -187,6 +188,7 @@ class Stage:
                 if self.measuring and self.ws_baseline and len(self.gaps)>=30 and percentile(self.gaps,.95)>2*self.ws_baseline:
                     self.halt('ws_update_latency')
                 if self.measuring and self.ws_count:
+                    self.counts['ws_active_min']=min(self.counts.get('ws_active_min',self.ws_active),self.ws_active)
                     stale=sum(now-t>10 for t in self.ws_last.values())
                     if stale/max(1,self.ws_count)>.01:self.halt('ws_stale_quotes')
                 loop_deadline=time.monotonic()+.05
@@ -270,12 +272,33 @@ class Stage:
             self.pending.add(task);task.add_done_callback(self.pending.discard)
             index+=1
 
+    def ws_failure(self,index,code,can_reconnect,established):
+        now=time.monotonic()
+        self.ws_failures.append(now)
+        while self.ws_failures and now-self.ws_failures[0]>60:self.ws_failures.popleft()
+        if code in ('401','403','429'):
+            self.halt('api_ws_'+code)
+        elif len(self.ws_failures)/max(1,self.ws_count)>.01:
+            self.halt('ws_error_rate')
+        retry=code=='1006' and established and can_reconnect and not self.stop.is_set()
+        print(json.dumps({'event':'ws_failure','time':time.time(),'index':index,
+            'endpoint':self.proxies[index%len(self.proxies)]['endpoint'],'code':code,'reconnect':retry}),flush=True)
+        if not retry and not self.stop.is_set():self.halt('ws_connection_failure')
+        return retry
+
     async def websocket(self,index):
+        for attempt in range(2):
+            if not await self.websocket_once(index,can_reconnect=attempt==0) or self.stop.is_set() or attempt==1:return
+            self.counts['ws_reconnects']+=1
+            await self.wait(1)
+            if self.stop.is_set():return
+
+    async def websocket_once(self,index,can_reconnect):
         import base58
         proxy=self.proxies[index%len(self.proxies)]
         identity_bytes=hashlib.sha256(f'{self.run_id}:{index}'.encode()).digest()
         identity=base58.b58encode(identity_bytes).decode()
-        ws=None;ping=None
+        ws=None;ping=None;established=False
         try:
             response=await self.auth_session.get('https://titan.exchange/api/apollo-jwt',params={'address':identity},
                 headers=self.titan.AUTH_HEADERS,proxy=proxy['url'],allow_redirects=False,timeout=15)
@@ -306,8 +329,12 @@ class Stage:
                         self.counts['ws_restriction_'+restriction]+=1
                         self.halt('api_ws_restriction');break
                     if valid_ws_quote(decoded,self.titan):
+                        established=True
                         now=time.monotonic()
-                        if index in self.ws_last and self.measuring:self.gaps.append((now-self.ws_last[index])*1000)
+                        if index in self.ws_last and self.measuring:
+                            gap=(now-self.ws_last[index])*1000
+                            self.gaps.append(gap)
+                            self.counts['ws_gap_max_ms']=max(self.counts['ws_gap_max_ms'],round(gap,3))
                         self.ws_last[index]=now
                         self.ws_valid.add(index)
                         if self.measuring:self.counts['ws_valid_messages']+=1
@@ -319,7 +346,7 @@ class Stage:
             # The existing transport exposes only a short code, never its URL/token.
             code=re.fullmatch(r'Titan Node WebSocket (?:open failed: )?([A-Za-z0-9_]+)',str(exc))
             if code:self.counts['ws_code_'+code.group(1)]+=1
-            if not self.stop.is_set():self.halt('ws_connection_failure')
+            if not self.stop.is_set():return self.ws_failure(index,code.group(1) if code else type(exc).__name__,can_reconnect,established)
         finally:
             if ping:
                 ping.cancel();await asyncio.gather(ping,return_exceptions=True)
