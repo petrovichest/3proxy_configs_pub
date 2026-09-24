@@ -197,6 +197,10 @@ class Stage:
                     self.counts['ws_active_min']=min(self.counts.get('ws_active_min',self.ws_active),self.ws_active)
                     stale=sum(now-t>10 for t in self.ws_last.values())
                     if stale/max(1,self.ws_count)>.01:self.halt('ws_stale_quotes')
+                self.metrics.write(json.dumps({'kind':'progress','time':time.time(),**stage_info,
+                    'http_valid':self.counts['http_valid'],'ws_active':self.ws_active,
+                    'ws_valid_connections':len(self.ws_valid),'ws_valid_messages':self.counts['ws_valid_messages'],
+                    'ws_stale':sum(now-t>10 for t in self.ws_last.values())})+'\n');self.metrics.flush()
                 loop_deadline=time.monotonic()+.05
                 await asyncio.sleep(.05)
                 lag=time.monotonic()-loop_deadline
@@ -208,7 +212,8 @@ class Stage:
     async def prepare(self):
         from curl_cffi.requests import AsyncSession
         from curl_cffi.const import CurlMOpt
-        self.session=AsyncSession(impersonate='chrome',trust_env=False,max_clients=256,timeout=15)
+        max_clients=self.manifest['http']['config']['quote_max_clients'] if self.manifest else 256
+        self.session=AsyncSession(impersonate='chrome',trust_env=False,max_clients=max_clients,timeout=15)
         self.session.acurl.setopt(CurlMOpt.MAXCONNECTS,2*len(self.proxies))
         if self.rps:
             from dotenv import dotenv_values
@@ -271,6 +276,7 @@ class Stage:
                 _,amount_out=normalize_quote(data,source,destination,amount,side,time.time(),time.monotonic()-started,
                     chain_id=self.config.chain_id,network=self.config.network,quote_address=self.config.quote_address,quote_symbol=self.config.quote_symbol)
                 ok=True
+                self.counts['http_valid_responses']+=1
                 if state and side=='buy':state.buy_amount=amount_out;state.buy_at=time.monotonic()
                 if self.measuring:
                     self.counts['http_valid']+=1
@@ -292,7 +298,7 @@ class Stage:
             deadline=origin+index/self.rps
             await asyncio.sleep(max(0,deadline-time.monotonic()))
             if self.stop.is_set():break
-            if len(self.pending)>=2*len(self.proxies):
+            if len(self.pending)>=min(2*len(self.proxies),self.config.quote_max_clients):
                 self.halt('client_concurrency');break
             if time.monotonic()-deadline>.1:
                 self.counts['missed_schedule']+=1
@@ -407,6 +413,7 @@ class Stage:
         monitor=asyncio.create_task(self.monitor())
         measured_seconds=0
         measure_start=None
+        warmup_counts={}
         print(json.dumps({'event':'stage_start','http_rps':self.rps,'ws_connections':self.ws_count,'proxy_count':len(self.proxies)}),flush=True)
         try:
             await asyncio.wait_for(self.monitor_ready.wait(),20)
@@ -422,6 +429,7 @@ class Stage:
             if not self.stop.is_set():
                 self.measuring=True
                 measure_start=time.monotonic()
+                warmup_counts=dict(self.counts)
                 self.counts.clear();self.latencies.clear();self.gaps.clear();self.samples.clear()
                 print(json.dumps({'event':'measurement_start'}),flush=True)
                 await self.wait(self.args.duration)
@@ -447,7 +455,10 @@ class Stage:
             'http_latency_ms':{p:percentile(self.latencies,f) for p,f in [('p50',.5),('p95',.95),('p99',.99)]},
             'ws_gap_ms':{p:percentile(self.gaps,f) for p,f in [('p50',.5),('p95',.95),('p99',.99)]},
             'ws_valid_connections':len(self.ws_valid),'counts':dict(self.counts),
+            'warmup_counts':warmup_counts,
             'workload':'production_snapshot' if self.manifest else 'single_pair_smoke',
+            'snapshot_captured_at':self.manifest['captured_at'] if self.manifest else None,
+            'http_directions_requested':len(self.http_jobs) if self.http_jobs else int(bool(self.rps)),
             'http_directions_validated':len(self.http_seen),
             'http_response_bytes':{p:percentile(self.http_sizes,f) for p,f in [('p50',.5),('p95',.95),('p99',.99)]},
             'ws_message_bytes':{p:percentile(self.ws_sizes,f) for p,f in [('p50',.5),('p95',.95),('p99',.99)]},

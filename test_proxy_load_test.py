@@ -48,7 +48,7 @@ class LoadGuardTests(unittest.TestCase):
             async def monitor():
                 stage.monitor_ready.set()
                 await asyncio.Future()
-            async def prepare():pass
+            async def prepare():stage.counts['ws_error_TestWarmup']=1
             async def wait(seconds):
                 if seconds:
                     await asyncio.sleep(.02)
@@ -57,6 +57,8 @@ class LoadGuardTests(unittest.TestCase):
             result=await stage.run()
             self.assertEqual(result['reason'],'interrupted')
             self.assertGreater(result['measurement_seconds'],0)
+            self.assertEqual(result['warmup_counts']['ws_error_TestWarmup'],1)
+            self.assertNotIn('ws_error_TestWarmup',result['counts'])
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(run(directory))
 
