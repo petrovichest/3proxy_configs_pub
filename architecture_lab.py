@@ -236,12 +236,15 @@ def start():
         raise
 
 
-def monitor(duration, interval):
+def monitor(duration, interval, unit='proxy-lab.slice'):
+    require_test_host()
+    if unit != 'proxy-lab.slice' and (not unit.startswith('3proxy-') or unit == '3proxy-logrotate.service'):
+        raise ValueError('Only the lab slice or a proxy service can be monitored with the memory guard')
     spec = importlib.util.spec_from_file_location('monitor', ROOT / 'capacity_monitor.py')
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     interface = json.loads(command('ip', '-j', 'route', 'show', 'default'))[0]['dev']
-    group_name = command('systemctl', 'show', 'proxy-lab.slice', '--property=ControlGroup', '--value')
+    group_name = command('systemctl', 'show', unit, '--property=ControlGroup', '--value')
     if not group_name:
         raise RuntimeError('Experimental cgroup is missing')
     group = Path('/sys/fs/cgroup' + group_name)
@@ -249,6 +252,7 @@ def monitor(duration, interval):
     previous = None
     while time.monotonic() - start_at <= duration:
         row = mod.snapshot(interface, process_names=('3proxy', 'gost'))
+        row['monitored_unit'] = unit
         for name in ('memory.current', 'memory.peak', 'memory.events', 'pids.current'):
             path = group / name
             if path.exists():
@@ -260,7 +264,10 @@ def monitor(duration, interval):
         previous = row
         if row['memory_available'] < 256 * 1024**2:
             print(json.dumps({'guard': 'available_memory', 'time': time.time()}), flush=True)
-            stop_trials()
+            if unit == 'proxy-lab.slice':
+                stop_trials()
+            else:
+                subprocess.run(['systemctl', 'stop', unit], check=True)
             return
         time.sleep(interval)
 
@@ -274,11 +281,12 @@ def main():
     parser.add_argument('--processes', type=int, default=1)
     parser.add_argument('--duration', type=float, default=600)
     parser.add_argument('--interval', type=float, default=2)
+    parser.add_argument('--unit', default='proxy-lab.slice', help='Group to measure and stop at the memory guard')
     args = parser.parse_args()
     if args.action == 'render':
         render(args.engine, args.count, args.processes)
     elif args.action == 'monitor':
-        monitor(args.duration, args.interval)
+        monitor(args.duration, args.interval, args.unit)
     else:
         require_test_host()
         {'prepare': prepare, 'restore': restore, 'start': start, 'stop': stop_trials}[args.action]()

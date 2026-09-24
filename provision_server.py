@@ -14,8 +14,6 @@ from server_preflight import inspect, memory_info
 ROOT = Path(__file__).resolve().parent
 RECORD = ROOT / 'deployment.json'
 RESERVE_BYTES = 512 * 1024**2
-# Updated only after the architecture comparison; not a user-facing batch knob.
-PROCESS_CAPACITY = 1000
 
 
 def generator():
@@ -46,8 +44,13 @@ def wait_ready(projects, deadline=180):
     while time.monotonic() < until:
         require_memory()
         for project in projects:
-            if subprocess.run(['systemctl', 'is-active', '--quiet', f'3proxy-{project}.service']).returncode:
+            properties = dict(line.split('=', 1) for line in subprocess.check_output(
+                ['systemctl', 'show', f'3proxy-{project}.service', '--property=ActiveState,NRestarts,MainPID'],
+                text=True).splitlines())
+            if properties.get('ActiveState') != 'active' or not int(properties.get('MainPID', 0)):
                 raise RuntimeError(f'Proxy service for {project} is not active')
+            if int(properties.get('NRestarts', 0)):
+                raise RuntimeError(f'Proxy service for {project} restarted during installation')
         listeners = subprocess.check_output(['ss', '-H', '-lnt'], text=True)
         listening = {(line.split()[3].rsplit(':', 1)[0], int(line.split()[3].rsplit(':', 1)[1]))
                      for line in listeners.splitlines()}
@@ -62,17 +65,23 @@ def create(args):
         raise ValueError('A positive --count is required')
     module = generator()
     network = inspect(ROOT, interface=args.interface, ipv4=args.external_ipv4, subnet=args.ipv6_subnet)
-    require_memory()
+    memory = require_memory()
+    budget = memory['available_bytes'] - RESERVE_BYTES
+    if args.count * 2048 > budget:
+        raise RuntimeError('Insufficient RAM to construct the complete requested configuration')
+    module.SERVICE_LIMITS['MemoryMax'] = budget
     ports, addresses = module.network_preflight(network['interface'], network['ipv4'])
     record = {'version': 1, 'status': 'creating', 'requested_count': args.count,
               'created_count': 0, 'projects': [], 'network': network,
+              'architecture': '3proxy-shared-v1', 'identity': 'host_port_username',
+              'resources': {'memory_max_bytes': budget, 'available_memory_reserve_bytes': RESERVE_BYTES},
               'started_at': time.time(), 'code_revision': subprocess.check_output(
                   ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()}
     save(record)
     try:
-        projects = module.generate_proxy_configs(args.count, args.project_prefix,
+        projects = module.generate_shared_pool(args.count, args.project_prefix,
                     network['ipv6_subnet'], network['interface'], network['ipv4'],
-                    target=True, batch_size=PROCESS_CAPACITY, reserved_ports=ports, reserved_addresses=addresses)
+                    reserved_ports=ports, reserved_addresses=addresses)
         record['projects'] = projects
         record['created_count'] = sum(len(module.proxy_records(module.BASE_OUTPUT_DIR / p / 'proxy_configs'))
                                       for p in projects)

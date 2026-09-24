@@ -27,7 +27,7 @@ def logging_block(project_name):
     return (
         f"{START_MARKER}\n"
         f"log {LOG_DIR / (project_name + '.log')}\n"
-        'logformat "G%Y-%m-%dT%H:%M:%S %C %p %R %E %D %I %O"\n'
+        'logformat "G%Y-%m-%dT%H:%M:%S %C %p %e %R %E %D %I %O"\n'
         f"{END_MARKER}\n"
     )
 
@@ -37,7 +37,8 @@ def add_logging_to_config(config, project_name):
     if START_MARKER in config or END_MARKER in config:
         if config.count(START_MARKER) != 1 or config.count(END_MARKER) != 1:
             raise ValueError("Incomplete or duplicated managed logging block")
-        if block not in config:
+        # Preserve already deployed legacy blocks byte-for-byte.
+        if block not in config and block.replace(' %e ', ' ') not in config:
             raise ValueError("Existing managed logging block differs from expected project")
         return config
     if UNMANAGED_LOG.search(config):

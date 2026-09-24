@@ -71,6 +71,8 @@ def inspect_projects():
             continue
         if not (directory / 'proxy_configs').exists():
             raise ValueError(f'Incomplete project: {directory.name}')
+        if (directory / 'pool.json').exists():
+            raise ValueError('A shared-port pool already exists; use manual recovery instead of the legacy generator')
         records = proxy_records(directory / 'proxy_configs')
         config = (directory / 'full_proxy_config').read_text()
         config_mappings = set()
@@ -95,22 +97,34 @@ def inspect_projects():
     return projects, endpoints, addresses
 
 
-def render_project(directory, project, records, interface):
+def render_project(directory, project, records, interface, *, shared=False):
     root = BASE_OUTPUT_DIR.parent
     user, password = records[0]['user'], records[0]['pass']
-    config = (f'maxconn 10000\nnscache 65536\ntimeouts 1 5 30 60 180 1800 15 60\n'
-              f'setgid 65535\nsetuid 65535\nflush\nauth strong\nusers {user}:CL:{password}\n'
-              f'deny * * 0.0.0.0/0\ndeny * * ::ffff:0.0.0.0/96\nallow {user}\n')
-    config += ''.join(f"proxy -64 -n -a -p{r['proxy_port']} -i{r['proxy_ip']} -e{r['ipv6'].split('/')[0]}\n" for r in records)
+    config = (f'maxconn {16000 if shared else 10000}\n'
+              f'{"nscache6" if shared else "nscache"} 65536\n'
+              'timeouts 1 5 30 60 180 1800 15 60\n'
+              'setgid 65535\nsetuid 65535\nflush\nauth strong\n')
+    if shared:
+        config += ''.join(f"users {r['user']}:CL:{r['pass']}\n" for r in records)
+        config += 'deny * * 0.0.0.0/0\ndeny * * ::ffff:0.0.0.0/96\n'
+        config += ''.join(f"allow {r['user']}\nparent 1000 extip {r['ipv6'].split('/')[0]} 0\n" for r in records)
+        config += f"deny *\nproxy -6 -n -a -p{records[0]['proxy_port']} -i{records[0]['proxy_ip']}\n"
+    else:
+        config += (f'users {user}:CL:{password}\n'
+                   f'deny * * 0.0.0.0/0\ndeny * * ::ffff:0.0.0.0/96\nallow {user}\n')
+        config += ''.join(f"proxy -64 -n -a -p{r['proxy_port']} -i{r['proxy_ip']} -e{r['ipv6'].split('/')[0]}\n" for r in records)
     atomic_write(directory / 'full_proxy_config', add_logging_to_config(config, project))
     atomic_write(directory / 'proxy_configs', ''.join(' '.join(f'{k}:{v}' for k,v in r.items())+'\n' for r in records))
     atomic_write(directory / 'extracted_proxy', ''.join(f"{r['proxy_ip']}:{r['proxy_port']}@{r['user']}:{r['pass']}\n" for r in records))
     final = BASE_OUTPUT_DIR / project
+    limits = dict(SERVICE_LIMITS)
+    if shared:
+        limits['TasksMax'] = max(int(limits['TasksMax']), 16384)
     unit = (f'[Unit]\nDescription=3proxy Service for {project}\nWants=network-online.target\nAfter=network-online.target\n\n'
             f'[Service]\nType=simple\nUser=root\nWorkingDirectory={final}\n'
             f'ExecStartPre={root}/venv/bin/python {root}/2_bind_ipv6_addresses.py {project} --interface {interface} --action add_all\n'
             f'ExecStart={root}/3proxy_binaries/3proxy full_proxy_config\n'
-            + ''.join(f'{key}={value}\n' for key,value in SERVICE_LIMITS.items()) +
+            + ''.join(f'{key}={value}\n' for key,value in limits.items()) +
             'TimeoutStartSec=180\nRestart=on-failure\nRestartSec=3\n\n'
             '[Install]\nWantedBy=multi-user.target\n')
     atomic_write(directory / 'service.unit', unit, 0o644)
@@ -129,6 +143,52 @@ def render_project(directory, project, records, interface):
     }
     for name, command in scripts.items():
         atomic_write(directory / name, f'#!/bin/bash\nset -euo pipefail\ncd -- "$(dirname -- "$0")"\n{command}\n', 0o700)
+
+
+def generate_shared_pool(count, project, ipv6_subnet, interface, external_ipv4, *,
+                         reserved_ports=(), reserved_addresses=()):
+    """Create exactly one shared listener; credentials select fixed outgoing IPv6s."""
+    logging_block(project)
+    network = ipaddress.IPv6Network(ipv6_subnet, strict=True)
+    ipaddress.IPv4Address(external_ipv4)
+    if count <= 0 or network.prefixlen not in (48, 64):
+        raise ValueError('A positive count and a /48 or /64 allocation are required')
+    if network.prefixlen == 48 and count > 65536:
+        raise ValueError('A /48 contains only 65536 distinct /64 prefixes')
+    if not re.fullmatch(r'[A-Za-z0-9_.:-]+', interface):
+        raise ValueError('Invalid network interface')
+    if any(c.isspace() for c in str(BASE_OUTPUT_DIR)):
+        raise ValueError('Installation path must not contain whitespace')
+    occupied = set(reserved_ports)
+    port = next((p for p in range(DEFAULT_START_PORT, DEFAULT_END_PORT + 1) if p not in occupied), None)
+    if port is None:
+        raise ValueError('No free input port')
+    BASE_OUTPUT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (BASE_OUTPUT_DIR / '.allocation.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if any(p.name != '.allocation.lock' for p in BASE_OUTPUT_DIR.iterdir()):
+            raise ValueError('Existing or incomplete pool; manual recovery is required')
+        excluded = {str(ipaddress.IPv6Address(a)) for a in reserved_addresses}
+        excluded.update((str(network.network_address + 1), str(network.network_address + 2)))
+        rows, suffix = [], 0
+        while len(rows) < count:
+            address = network.network_address + ((suffix << 64) + 0x66 if network.prefixlen == 48 else suffix + 2)
+            suffix += 1
+            if address not in network:
+                raise ValueError('Not enough unused IPv6 addresses for the complete requested count')
+            if str(address) in excluded:
+                continue
+            rows.append(dict(user=f'{project}_{len(rows) + 1:05d}', **{'pass': secrets.token_urlsafe(24)},
+                             proxy_ip=external_ipv4, proxy_port=str(port), ipv6=f'{address}/64'))
+        with tempfile.TemporaryDirectory(prefix='.staging-', dir=BASE_OUTPUT_DIR) as temp:
+            render_project(Path(temp), project, rows, interface, shared=True)
+            atomic_write(Path(temp) / 'pool.json', json.dumps({
+                'architecture': '3proxy-shared-v1', 'identity': 'host_port_username',
+                'count': count, 'listen_ipv4': external_ipv4, 'listen_port': port,
+                'interface': interface, 'ipv6_subnet': str(network)}, indent=2) + '\n')
+            os.rename(temp, BASE_OUTPUT_DIR / project)
+        print(f'Created {project}: {count} identities, 1 listener', flush=True)
+        return [project]
 
 
 def generate_proxy_configs(num_proxies, project_name, ipv6_subnet, interface, external_ipv4, *, target=False, batch_size=1000, reserved_ports=(), reserved_addresses=()):

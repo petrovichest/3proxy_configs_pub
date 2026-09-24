@@ -22,6 +22,11 @@ class LoggingConfigTests(unittest.TestCase):
         self.assertIn("log /var/log/3proxy/example_1.log", updated)
         self.assertNotIn("%U", updated)
         self.assertNotIn("%T", updated)
+        self.assertIn("%e", updated)
+
+    def test_existing_log_format_is_preserved(self):
+        old = add_logging_to_config('auth strong\n', 'example_1').replace(' %e ', ' ')
+        self.assertEqual(add_logging_to_config(old, 'example_1'), old)
 
     def test_rejects_conflicts_without_rewriting(self):
         with self.assertRaises(ValueError):

@@ -93,7 +93,7 @@ def download_pool(sftp, directory, local):
         destination = local / project
         destination.mkdir(mode=0o700, exist_ok=True)
         destination.chmod(0o700)
-        for name in ('extracted_proxy', 'proxy_configs'):
+        for name in ('extracted_proxy', 'proxy_configs', 'pool.json'):
             try:
                 with sftp.open(f'{directory}/generated_proxy_configs/{project}/{name}') as source:
                     content = source.read().decode()

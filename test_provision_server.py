@@ -46,7 +46,11 @@ class ExportTests(unittest.TestCase):
                  '/remote/generated_proxy_configs/capacity_1/extracted_proxy': b'192.0.2.1:10000@test:password\n',
                  '/remote/generated_proxy_configs/capacity_1/proxy_configs': b'mapping\n'}
         sftp = Mock()
-        sftp.open.side_effect = lambda path: io.BytesIO(files[path])
+        def open_remote(path):
+            if path not in files:
+                raise FileNotFoundError(path)
+            return io.BytesIO(files[path])
+        sftp.open.side_effect = open_remote
         with tempfile.TemporaryDirectory() as temp:
             local = Path(temp)
             result = remote.download_pool(sftp, '/remote', local)

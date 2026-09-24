@@ -122,6 +122,37 @@ class GenerationTests(unittest.TestCase):
         self.assertFalse(gen.configure_allocator(unit,0))
         self.assertNotIn('MALLOC_ARENA_MAX',unit.read_text())
 
+    def test_shared_pool_maps_every_username_to_one_unique_ipv6(self):
+        names = gen.generate_shared_pool(3000, 'shared', '2001:db8:1234::/48', 'net0', '192.0.2.1',
+                                         reserved_ports={10000}, reserved_addresses={'2001:db8:1234::66'})
+        self.assertEqual(names, ['shared'])
+        directory = self.base / 'shared'
+        rows = gen.proxy_records(directory / 'proxy_configs')
+        self.assertEqual(len(rows), 3000)
+        self.assertEqual({r['proxy_port'] for r in rows}, {'10001'})
+        self.assertEqual(len({r['user'] for r in rows}), 3000)
+        self.assertEqual(len({ipaddress.IPv6Interface(r['ipv6']).network for r in rows}), 3000)
+        config = (directory / 'full_proxy_config').read_text().splitlines()
+        self.assertEqual(sum(line.startswith('proxy ') for line in config), 1)
+        mappings = {config[i].split()[1]: line.split()[3] for i, line in enumerate(config[1:])
+                    if line.startswith('parent 1000 extip ')}
+        self.assertEqual(mappings, {r['user']: r['ipv6'].split('/')[0] for r in rows})
+        self.assertEqual(len(checker.load_proxies(directory)), 3000)
+        original = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+        with self.assertRaisesRegex(ValueError, 'manual recovery'):
+            gen.generate_shared_pool(3000, 'shared', '2001:db8:1234::/48', 'net0', '192.0.2.1')
+        self.assertEqual(original, {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()})
+        with self.assertRaisesRegex(ValueError, 'shared-port pool'):
+            self.generate(3001)
+
+    def test_shared_pool_rejects_partial_state_and_insufficient_subnets(self):
+        with self.assertRaisesRegex(ValueError, '65536'):
+            gen.generate_shared_pool(65537, 'shared', '2001:db8:1234::/48', 'net0', '192.0.2.1')
+        self.assertFalse(self.base.exists())
+        (self.base / '.staging-failed').mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'incomplete pool'):
+            gen.generate_shared_pool(3, 'shared', '2001:db8:1234::/48', 'net0', '192.0.2.1')
+
 
 class BindingTests(unittest.TestCase):
     def test_specific_address_cli_preserves_other_project_addresses(self):
