@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import secrets
+import resource
 import ssl
 import subprocess
 import time
@@ -66,6 +67,8 @@ def fixture_config():
 
 
 async def fixture():
+    if resource.getrlimit(resource.RLIMIT_NOFILE)[0] < 32768:
+        raise RuntimeError('Fixture requires LimitNOFILE >= 32768')
     LAB.mkdir(mode=0o700, parents=True, exist_ok=True)
     cert, key = LAB / 'fixture.crt', LAB / 'fixture.key'
     if not cert.exists() or not key.exists():
@@ -250,6 +253,8 @@ class Workload:
             finally:
                 if opened:
                     self.ws_open -= 1
+                    if self.measuring:
+                        self.ws_min = min(self.ws_min, self.ws_open)
                     self.sockets.discard(socket)
                     await socket.close()
             if not self.stopped:
@@ -304,6 +309,8 @@ class Workload:
                         any(not results[k] for k in ('bad_password_rejected', 'ipv4_rejected', 'mapped_ipv4_rejected'))))
 
     async def run(self):
+        if resource.getrlimit(resource.RLIMIT_NOFILE)[0] < 32768:
+            raise RuntimeError('Load generator requires LimitNOFILE >= 32768')
         connector = aiohttp.TCPConnector(ssl=self.tls, limit=0, keepalive_timeout=1800)
         async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
             semaphore = asyncio.Semaphore(30)
