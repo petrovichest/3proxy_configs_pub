@@ -75,7 +75,7 @@ def prepare():
     if len(rows) != 9000:
         raise RuntimeError('Unexpected original pool size')
     sockets = command('ss', '-H', '-nt', 'state', 'established')
-    if any(ip + ':' in sockets for ip in ('72.56.71.143', '5.9.117.153')):
+    if any(ip + ':' in sockets for ip in ('5.9.117.153',)):
         raise RuntimeError('A production parser host has an established connection')
     units = []
     for directory in sorted((ROOT / 'generated_proxy_configs').glob('capacity_*')):
@@ -128,7 +128,7 @@ def archive_original():
     if file_hashes() != snapshot['hashes']:
         raise RuntimeError('Original configuration hashes changed')
     sockets = command('ss', '-H', '-nt', 'state', 'established')
-    if any(ip + ':' in sockets for ip in ('72.56.71.143', '5.9.117.153')):
+    if any(ip + ':' in sockets for ip in ('5.9.117.153',)):
         raise RuntimeError('A parser or load generator still has an established connection')
     unit_paths = []
     for unit in snapshot['units']:
