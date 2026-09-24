@@ -76,7 +76,9 @@ async def main():
     if args.sample and args.sample<len(proxies):
         proxies=[proxies[i*len(proxies)//args.sample] for i in range(args.sample)]
     semaphore=asyncio.Semaphore(args.concurrency)
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20),trust_env=False) as client:
+    # Every proxy is checked once: release its connection immediately afterwards.
+    connector=aiohttp.TCPConnector(force_close=True,limit=args.concurrency)
+    async with aiohttp.ClientSession(connector=connector,timeout=aiohttp.ClientTimeout(total=20),trust_env=False) as client:
         results=await asyncio.gather(*(check_proxy(client,p,semaphore,args.check_url) for p in proxies))
     output=Path(args.output_file)
     if not output.is_absolute():
