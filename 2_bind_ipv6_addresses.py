@@ -58,13 +58,23 @@ def main():
     parser.add_argument('project_name')
     parser.add_argument('--interface',required=True)
     parser.add_argument('--action',choices=['add','add_all','del','del_all'],default='add')
+    parser.add_argument('--ipv6',help='Select one address from this project')
+    parser.add_argument('--prefixlen',type=int,help='Verify the selected address prefix length')
     args=parser.parse_args()
     if not all(c.isalnum() or c in '_.:-' for c in args.interface):
         parser.error('Invalid interface')
     path=Path(__file__).resolve().parent/'generated_proxy_configs'/args.project_name/'proxy_configs'
     if Path(args.project_name).name != args.project_name:
         parser.error('Invalid project name')
-    bind_addresses(extract_ipv6_addresses(path),args.interface,'add' if args.action.startswith('add') else 'del')
+    addresses=extract_ipv6_addresses(path)
+    if args.ipv6:
+        selected=ipaddress.IPv6Address(args.ipv6)
+        addresses=[address for address in addresses if address.ip==selected]
+        if not addresses:
+            parser.error('IPv6 address does not belong to this project')
+    if args.prefixlen is not None and any(address.network.prefixlen!=args.prefixlen for address in addresses):
+        parser.error('Prefix length differs from the generated configuration')
+    bind_addresses(addresses,args.interface,'add' if args.action.startswith('add') else 'del')
 
 
 if __name__=='__main__':

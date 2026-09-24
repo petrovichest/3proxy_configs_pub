@@ -124,6 +124,20 @@ class GenerationTests(unittest.TestCase):
 
 
 class BindingTests(unittest.TestCase):
+    def test_specific_address_cli_preserves_other_project_addresses(self):
+        addresses=[ipaddress.IPv6Interface(x+'/64') for x in ('2001:db8::3','2001:db8::4')]
+        args=['2_bind_ipv6_addresses.py','test','--interface','net0','--action','del',
+              '--ipv6','2001:db8::4','--prefixlen','64']
+        with patch('sys.argv',args),patch.object(bind,'extract_ipv6_addresses',return_value=addresses),patch.object(bind,'bind_addresses') as apply:
+            bind.main()
+            apply.assert_called_once_with([addresses[1]],'net0','del')
+
+    def test_specific_address_cli_rejects_unrelated_primary_address(self):
+        args=['2_bind_ipv6_addresses.py','test','--interface','net0','--action','del','--ipv6','2001:db8::2']
+        with patch('sys.argv',args),patch.object(bind,'extract_ipv6_addresses',return_value=[ipaddress.IPv6Interface('2001:db8::3/64')]),patch.object(bind,'bind_addresses') as apply,contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):bind.main()
+            apply.assert_not_called()
+
     def test_repeated_bind_is_noop(self):
         with patch.object(bind,'current_addresses',return_value={'2001:db8::3':{}}),patch.object(bind.subprocess,'run') as run:
             bind.bind_addresses([ipaddress.IPv6Interface('2001:db8::3/64')],'net0','add')
