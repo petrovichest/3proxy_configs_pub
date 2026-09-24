@@ -237,11 +237,14 @@ def monitor(duration, interval):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     interface = json.loads(command('ip', '-j', 'route', 'show', 'default'))[0]['dev']
+    group_name = command('systemctl', 'show', 'proxy-lab.slice', '--property=ControlGroup', '--value')
+    if not group_name:
+        raise RuntimeError('Experimental cgroup is missing')
+    group = Path('/sys/fs/cgroup' + group_name)
     start_at = time.monotonic()
     previous = None
     while time.monotonic() - start_at <= duration:
         row = mod.snapshot(interface, process_names=('3proxy', 'gost'))
-        group = Path('/sys/fs/cgroup/proxy-lab.slice')
         for name in ('memory.current', 'memory.peak', 'memory.events', 'pids.current'):
             path = group / name
             if path.exists():
