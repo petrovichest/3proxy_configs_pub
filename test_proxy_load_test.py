@@ -1,11 +1,32 @@
 import asyncio
 from collections import Counter
 from types import SimpleNamespace
+from pathlib import Path
+import tempfile
 import unittest
 from proxy_load_test import resource_stop,parse_proxy,percentile,Stage,ws_restriction,valid_ws_quote
 
 
 class LoadGuardTests(unittest.TestCase):
+    def test_interrupted_measurement_retains_elapsed_time(self):
+        async def run(directory):
+            stage=Stage(SimpleNamespace(output=Path(directory)/'result.jsonl',host='192.0.2.1',
+                                        warmup=0,duration=300),[],0,0)
+            async def monitor():
+                stage.monitor_ready.set()
+                await asyncio.Future()
+            async def prepare():pass
+            async def wait(seconds):
+                if seconds:
+                    await asyncio.sleep(.02)
+                    raise asyncio.CancelledError()
+            stage.monitor=monitor;stage.prepare=prepare;stage.wait=wait
+            result=await stage.run()
+            self.assertEqual(result['reason'],'interrupted')
+            self.assertGreater(result['measurement_seconds'],0)
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(run(directory))
+
     def test_resource_guards(self):
         healthy={'memory_available':1024**3,'services':[]}
         self.assertIsNone(resource_stop(healthy))

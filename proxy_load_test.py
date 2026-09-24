@@ -336,6 +336,7 @@ class Stage:
         self.metrics=(self.args.output.with_suffix('.metrics.jsonl')).open('a')
         monitor=asyncio.create_task(self.monitor())
         measured_seconds=0
+        measure_start=None
         print(json.dumps({'event':'stage_start','http_rps':self.rps,'ws_connections':self.ws_count,'proxy_count':len(self.proxies)}),flush=True)
         try:
             await asyncio.wait_for(self.monitor_ready.wait(),20)
@@ -354,10 +355,11 @@ class Stage:
                 self.counts.clear();self.latencies.clear();self.gaps.clear();self.samples.clear()
                 print(json.dumps({'event':'measurement_start'}),flush=True)
                 await self.wait(self.args.duration)
-                measured_seconds=time.monotonic()-measure_start
         except asyncio.CancelledError:self.halt('interrupted')
         except Exception as exc:self.halt('setup_'+type(exc).__name__)
         finally:
+            if measure_start is not None:
+                measured_seconds=time.monotonic()-measure_start
             self.stop.set()
             for task in self.workers+list(self.pending):task.cancel()
             await asyncio.gather(*self.workers,*list(self.pending),return_exceptions=True)
