@@ -1,9 +1,14 @@
 import unittest
 
-from architecture_workload import Histogram, proxy_url, same_ip
+from architecture_workload import Histogram, proxy_url, same_ip, uniform_pool
 
 
 class MeasurementTests(unittest.TestCase):
+    def test_active_subset_covers_the_whole_configured_pool(self):
+        self.assertEqual(uniform_pool(list(range(9000)), 3), [0, 3000, 6000])
+        self.assertEqual(uniform_pool([1, 2], 1000), [1, 2])
+        self.assertEqual(uniform_pool([1, 2], 0), [])
+
     def test_histogram_covers_entire_run_including_early_slow_events(self):
         histogram = Histogram()
         for _ in range(100):

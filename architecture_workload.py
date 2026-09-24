@@ -39,6 +39,11 @@ def same_ip(actual, expected):
         return False
 
 
+def uniform_pool(pool, count):
+    count = min(count, len(pool))
+    return [pool[i * len(pool) // count] for i in range(count)]
+
+
 class Histogram:
     def __init__(self):
         self.buckets = Counter()
@@ -201,7 +206,7 @@ class Workload:
     async def http_loop(self, session):
         if not self.args.rps:
             return
-        pool = self.pool[:self.args.http_pool or len(self.pool)]
+        pool = uniform_pool(self.pool, self.args.http_pool or len(self.pool))
         started, index = time.monotonic(), 0
         while not self.stopped:
             await asyncio.sleep(max(0, started + index / self.args.rps - time.monotonic()))
@@ -314,7 +319,8 @@ class Workload:
         connector = aiohttp.TCPConnector(ssl=self.tls, limit=0, keepalive_timeout=1800)
         async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
             semaphore = asyncio.Semaphore(30)
-            tasks = [asyncio.create_task(self.ws_worker(session, self.pool[i % len(self.pool)], semaphore))
+            ws_pool = uniform_pool(self.pool, self.args.ws)
+            tasks = [asyncio.create_task(self.ws_worker(session, ws_pool[i % len(ws_pool)], semaphore))
                      for i in range(self.args.ws)]
             http = asyncio.create_task(self.http_loop(session))
             try:
@@ -372,6 +378,8 @@ def main():
     parser.add_argument('--duration', type=float, default=180)
     parser.add_argument('--reconnect-at', type=float, default=0)
     args = parser.parse_args()
+    if args.rps < 0 or args.ws < 0 or args.http_pool < 0 or args.duration <= 0 or args.warmup < 0:
+        parser.error('Invalid workload size or duration')
     if args.mode == 'fixture':
         asyncio.run(fixture())
         return
