@@ -150,7 +150,8 @@ def render(engine, count, processes):
         os.chown(log, 65535, 65535)
         if engine in ('ports', 'shared'):
             content = (f'log {log}\nlogformat "G%Y-%m-%dT%H:%M:%S %C %p %R %E %D %I %O"\n'
-                       'maxconn 16000\nnscache 65536\ntimeouts 1 5 30 60 180 1800 15 60\n'
+                       f'maxconn 16000\n{"nscache6" if engine == "shared" else "nscache"} 65536\n'
+                       'timeouts 1 5 30 60 180 1800 15 60\n'
                        'setgid 65535\nsetuid 65535\nflush\nauth strong\n')
             for user in sorted({r['username'] for r in chunk}):
                 content += f'users {user}:CL:{password}\n'
@@ -179,10 +180,13 @@ def render(engine, count, processes):
             raise ValueError('Unknown engine')
         path.chmod(0o600)
         configs.append({'unit': f'proxy-lab-engine-{number}', 'command': binary_args,
+                        'config_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                        'binary_sha256': hashlib.sha256(Path(binary_args[0]).read_bytes()).hexdigest(),
                         'ports': sorted({r['port'] for r in chunk})})
     write_json(case / 'pool.json', pool)
     write_json(LAB / 'current.json', {'case': str(case), 'engine': engine, 'count': count,
-                                    'processes': processes, 'configs': configs})
+                                    'processes': processes, 'configs': configs,
+                                    'code_revision': command('git', '-C', ROOT, 'rev-parse', 'HEAD')})
     print(json.dumps({'case': str(case), 'engine': engine, 'count': count, 'processes': processes}))
 
 
