@@ -2,6 +2,7 @@
 """One-time SSH provisioning; application files reach the server through Git."""
 import argparse
 import getpass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -106,6 +107,48 @@ def download_pool(sftp, directory, local):
     return deployment
 
 
+def migrate(client, sftp, args, network):
+    local = args.output_dir / args.host
+    common = ['--legacy-directory', args.legacy_directory, '--project-prefix', args.project_prefix,
+              '--listen-port', str(args.listen_port), *network]
+    if args.phase == 'prepare':
+        run(client, ['python3', 'migrate_server.py', 'inspect', *common], args.directory)
+        if not args.skip_install:
+            run(client, ['bash', 'install_all.sh'], args.directory)
+    try:
+        run(client, ['python3', 'migrate_server.py', args.phase, *common], args.directory)
+    finally:
+        deployment = download_pool(sftp, args.directory, local)
+    if deployment is None:
+        raise RuntimeError('Migration record is missing')
+    if args.phase != 'prepare':
+        return 2 if deployment['status'] == 'rollback_pending' else 0
+    if deployment['status'] == 'complete':
+        return 0
+    if args.skip_check:
+        print(f'Pool prepared but NOT VERIFIED: {local}')
+        return 2
+    failures, checked, reports = 0, 0, hashlib.sha256()
+    for project in deployment['projects']:
+        result = subprocess.run([sys.executable, str(Path(__file__).with_name('4_proxy_checker.py')),
+            '--project-name', project, '--base-dir', str(local), '--concurrency', str(args.check_concurrency)])
+        failures += result.returncode != 0
+        path = local / project / 'proxy_check_results.txt'
+        if path.exists():
+            raw = path.read_bytes()
+            reports.update(raw)
+            rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+            checked += sum(row.get('ok') is True for row in rows)
+    try:
+        run(client, ['python3', 'migrate_server.py', 'verify', '--verification',
+            'failed' if failures else 'passed', '--verified-count', str(checked),
+            '--report-sha256', reports.hexdigest()], args.directory)
+    finally:
+        download_pool(sftp, args.directory, local)
+    print(f'Prepared and verified {checked} proxies. Migrate consumers before --phase finalize.')
+    return 0
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host')
@@ -113,20 +156,34 @@ def main():
     parser.add_argument('--key')
     parser.add_argument('--password',action='store_true',help='Prompt securely for an SSH password')
     parser.add_argument('--target-count',type=int)
-    parser.add_argument('--project-prefix',default='capacity')
+    parser.add_argument('--mode',choices=('create','migrate'),default='create')
+    parser.add_argument('--phase',choices=('prepare','finalize','rollback'),default='prepare')
+    parser.add_argument('--legacy-directory',default='/home/3proxy_configs_pub')
+    parser.add_argument('--listen-port',type=int,default=20000)
+    parser.add_argument('--check-concurrency',type=int,default=10)
+    parser.add_argument('--project-prefix')
     parser.add_argument('--ipv6-subnet')
     parser.add_argument('--interface')
     parser.add_argument('--external-ipv4')
     parser.add_argument('--repo-url',default='https://github.com/petrovichest/3proxy_configs_pub.git')
-    parser.add_argument('--directory',default='/home/3proxy_configs_pub')
+    parser.add_argument('--directory')
     parser.add_argument('--skip-install',action='store_true')
     parser.add_argument('--skip-check',action='store_true',help='Export an unverified pool; returns exit code 2')
     parser.add_argument('--output-dir',type=Path,default=Path('downloaded_configs'))
     args=parser.parse_args()
     args.host=args.host or input('SSH host: ').strip()
-    args.target_count=args.target_count if args.target_count is not None else int(input('Total proxy count: '))
-    if args.target_count<=0:
-        parser.error('Positive target count required')
+    args.directory = args.directory or ('/home/3proxy_shared' if args.mode == 'migrate' else '/home/3proxy_configs_pub')
+    args.project_prefix = args.project_prefix or ('shared' if args.mode == 'migrate' else 'capacity')
+    if args.mode == 'create':
+        args.target_count=args.target_count if args.target_count is not None else int(input('Total proxy count: '))
+        if args.target_count<=0:
+            parser.error('Positive target count required')
+    elif args.target_count is not None:
+        parser.error('Migration preserves the existing count; omit --target-count')
+    if args.check_concurrency <= 0 or not 1 <= args.listen_port <= 65535:
+        parser.error('Invalid check concurrency or listen port')
+    if args.mode == 'migrate' and args.directory.rstrip('/') == args.legacy_directory.rstrip('/'):
+        parser.error('Migration requires a separate destination directory')
     if Path(args.host).name != args.host or args.host in ('.', '..'):
         parser.error('Invalid host')
     os.umask(0o077)
@@ -148,6 +205,8 @@ def main():
                               ('--ipv6-subnet', args.ipv6_subnet)):
             if value:
                 network += [option, value]
+        if args.mode == 'migrate':
+            return migrate(client, sftp, args, network)
         # Discovery and the existing-pool guard run before installing packages.
         run(client, ['python3', 'server_preflight.py', *network], args.directory)
         if not args.skip_install:
