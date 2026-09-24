@@ -7,14 +7,14 @@ from pathlib import Path
 import time
 
 
-def snapshot(interface):
+def snapshot(interface, process_names=('3proxy',)):
     memory={line.split(':')[0]:int(line.split()[1])*1024 for line in Path('/proc/meminfo').read_text().splitlines() if len(line.split())>1}
     cpu=list(map(int,Path('/proc/stat').read_text().splitlines()[0].split()[1:9]))
     services=[]
     for directory in Path('/proc').iterdir():
         if not directory.name.isdigit():continue
         try:
-            if (directory/'comm').read_text().strip()!='3proxy':continue
+            if (directory/'comm').read_text().strip() not in process_names:continue
             status=dict(l.split(':',1) for l in (directory/'status').read_text().splitlines() if ':' in l)
             group=(directory/'cgroup').read_text().strip().split('::',1)[1]
             cgroup=Path('/sys/fs/cgroup'+group)
