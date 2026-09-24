@@ -339,6 +339,7 @@ class Workload:
                     if self.args.reconnect_at and not reconnected and time.monotonic()-self.begin >= self.args.reconnect_at:
                         reconnected = True
                         self.reconnect_generation += 1
+                        self.counters['planned_reconnect_rounds'] += 1
                         await asyncio.gather(*(s.close() for s in list(self.sockets)))
                     if self.counters['wrong_exit'] or self.counters['generator_backpressure']:
                         self.counters['stopped_early'] += 1
@@ -351,7 +352,8 @@ class Workload:
                 result['final'] = True
                 result['configuration'] = {'count': len(self.pool), 'http_pool': self.args.http_pool or len(self.pool),
                                            'rps': self.args.rps, 'ws': self.args.ws,
-                                           'warmup': self.args.warmup, 'duration': self.args.duration}
+                                           'warmup': self.args.warmup, 'duration': self.args.duration,
+                                           'reconnect_at': self.args.reconnect_at}
                 print(json.dumps(result), flush=True)
             finally:
                 self.stopped = True
