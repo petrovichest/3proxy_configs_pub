@@ -364,8 +364,12 @@ class Workload:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-        return int(bool(self.counters['wrong_exit'] or self.counters['ws_error'] or
-                        self.counters['http_error'] or self.counters['generator_backpressure']))
+        return int(bool(any(self.counters[key] for key in (
+            'wrong_exit', 'ws_error', 'http_error', 'warmup_http_error',
+            'generator_backpressure', 'initial_ws_shortfall', 'stopped_early')) or
+            result['ws_open'] != self.args.ws or
+            result['valid_rps'] < self.args.rps * .99 or
+            result['elapsed'] < self.args.duration))
 
 
 def main():
