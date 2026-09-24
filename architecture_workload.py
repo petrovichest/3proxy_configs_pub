@@ -75,7 +75,7 @@ async def fixture():
         subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
                         '-keyout', str(key), '-out', str(cert), '-days', '7', '-subj',
                         '/CN=proxy-architecture-fixture', '-addext',
-                        f'subjectAltName=IP:{FIXTURE_IPV6},IP:{FIXTURE_IPV4}'],
+                        f'subjectAltName=DNS:proxy-architecture-fixture,IP:{FIXTURE_IPV6},IP:{FIXTURE_IPV4}'],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     key.chmod(0o600)
     config_path = LAB / 'fixture.json'
