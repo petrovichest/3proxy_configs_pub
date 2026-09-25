@@ -87,6 +87,11 @@ def download_pool(sftp, directory, local):
     except FileNotFoundError:
         return None
     atomic_local(local / 'deployment.json', json.dumps(deployment, indent=2) + '\n')
+    try:
+        with sftp.open(directory + '/expansion.json') as source:
+            atomic_local(local / 'expansion.json', source.read().decode())
+    except FileNotFoundError:
+        pass
     combined = []
     for project in deployment.get('projects', []):
         if Path(project).name != project or project in ('.', '..'):
@@ -149,6 +154,39 @@ def migrate(client, sftp, args, network):
     return 0
 
 
+def expand(client, sftp, args):
+    local = args.output_dir / args.host
+    try:
+        if args.phase == 'rollback':
+            run(client, ['python3', 'expand_server.py', 'rollback'], args.directory)
+            return 0
+        raw = run(client, ['python3', 'expand_server.py', 'prepare', '--target-count',
+                           str(args.target_count)], args.directory)
+        if json.loads(raw)['status'] == 'complete':
+            return 0
+        run(client, ['python3', 'expand_server.py', 'apply'], args.directory)
+    finally:
+        download_pool(sftp, args.directory, local)
+    if args.skip_check:
+        print(f'Expanded pool is NOT VERIFIED: {local}')
+        return 2
+    record = json.loads((local / 'expansion.json').read_text())
+    project = record['project']
+    result = subprocess.run([sys.executable, str(Path(__file__).with_name('4_proxy_checker.py')),
+        '--project-name', project, '--base-dir', str(local), '--concurrency', str(args.check_concurrency)])
+    report = (local / project / 'proxy_check_results.txt').read_bytes()
+    rows = [json.loads(line) for line in report.splitlines() if line.strip()]
+    checked = sum(r.get('ok') is True for r in rows)
+    try:
+        run(client, ['python3', 'expand_server.py', 'verify', '--verification',
+            'passed' if result.returncode == 0 else 'failed', '--verified-count', str(checked),
+            '--report-sha256', hashlib.sha256(report).hexdigest()], args.directory)
+    finally:
+        download_pool(sftp, args.directory, local)
+    print(f'Expanded and verified {checked} identities; credentials saved privately to {local}')
+    return 0
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host')
@@ -156,7 +194,7 @@ def main():
     parser.add_argument('--key')
     parser.add_argument('--password',action='store_true',help='Prompt securely for an SSH password')
     parser.add_argument('--target-count',type=int)
-    parser.add_argument('--mode',choices=('create','migrate'),default='create')
+    parser.add_argument('--mode',choices=('create','migrate','expand'),default='create')
     parser.add_argument('--phase',choices=('prepare','finalize','rollback'),default='prepare')
     parser.add_argument('--legacy-directory',default='/home/3proxy_configs_pub')
     parser.add_argument('--listen-port',type=int,default=20000)
@@ -172,14 +210,21 @@ def main():
     parser.add_argument('--output-dir',type=Path,default=Path('downloaded_configs'))
     args=parser.parse_args()
     args.host=args.host or input('SSH host: ').strip()
-    args.directory = args.directory or ('/home/3proxy_shared' if args.mode == 'migrate' else '/home/3proxy_configs_pub')
+    args.directory = args.directory or ('/home/3proxy_shared' if args.mode != 'create' else '/home/3proxy_configs_pub')
     args.project_prefix = args.project_prefix or ('shared' if args.mode == 'migrate' else 'capacity')
     if args.mode == 'create':
         args.target_count=args.target_count if args.target_count is not None else int(input('Total proxy count: '))
         if args.target_count<=0:
             parser.error('Positive target count required')
-    elif args.target_count is not None:
+    elif args.mode == 'migrate' and args.target_count is not None:
         parser.error('Migration preserves the existing count; omit --target-count')
+    if args.mode == 'expand':
+        if args.phase == 'finalize':
+            parser.error('Expansion verifies automatically; use prepare or rollback')
+        if args.phase == 'prepare' and (args.target_count is None or args.target_count <= 0):
+            parser.error('Expansion requires a positive --target-count')
+        if any((args.interface, args.external_ipv4, args.ipv6_subnet, args.project_prefix != 'capacity')):
+            parser.error('Expansion reads the project and network from the existing pool')
     if args.check_concurrency <= 0 or not 1 <= args.listen_port <= 65535:
         parser.error('Invalid check concurrency or listen port')
     if args.mode == 'migrate' and args.directory.rstrip('/') == args.legacy_directory.rstrip('/'):
@@ -189,7 +234,7 @@ def main():
     os.umask(0o077)
     client=connect(args.host,args.user,args.key,getpass.getpass('SSH password: ') if args.password else None)
     try:
-        if not args.skip_install:
+        if not args.skip_install and args.mode != 'expand':
             run(client,['bash','-c','if ! command -v git >/dev/null 2>&1; then '
                         'export DEBIAN_FRONTEND=noninteractive; '
                         'apt-get update -q && apt-get install -y git ca-certificates; fi'])
@@ -207,6 +252,8 @@ def main():
                 network += [option, value]
         if args.mode == 'migrate':
             return migrate(client, sftp, args, network)
+        if args.mode == 'expand':
+            return expand(client, sftp, args)
         # Discovery and the existing-pool guard run before installing packages.
         run(client, ['python3', 'server_preflight.py', *network], args.directory)
         if not args.skip_install:

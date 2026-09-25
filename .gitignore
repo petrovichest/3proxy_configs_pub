@@ -217,3 +217,5 @@ downloaded_configs/
 /capacity_results/
 /deployment.json
 /.provision.lock
+/expansion.json
+/expansion_state/

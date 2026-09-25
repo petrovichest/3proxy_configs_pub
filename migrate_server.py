@@ -89,6 +89,8 @@ def connections(endpoints):
 
 
 def load_record():
+    if (ROOT / 'expansion.json').exists():
+        raise ValueError('Shared pool has an expansion journal; use expand_server.py and its rollback instructions')
     record = json.loads(RECORD.read_text())
     if record.get('kind') != 'legacy_migration' or record.get('version') != 1:
         raise ValueError('This is not a supported migration record')
