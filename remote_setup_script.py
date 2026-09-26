@@ -202,6 +202,9 @@ def main():
     parser.add_argument('--project-prefix')
     parser.add_argument('--ipv6-subnet')
     parser.add_argument('--interface')
+    parser.add_argument('--memory-max-mib', type=int)
+    parser.add_argument('--reserve-memory-mib', type=int)
+    parser.add_argument('--cpu-quota-percent', type=int)
     parser.add_argument('--external-ipv4')
     parser.add_argument('--repo-url',default='https://github.com/petrovichest/3proxy_configs_pub.git')
     parser.add_argument('--directory')
@@ -227,6 +230,13 @@ def main():
             parser.error('Expansion reads the project and network from the existing pool')
     if args.check_concurrency <= 0 or not 1 <= args.listen_port <= 65535:
         parser.error('Invalid check concurrency or listen port')
+    resource_options = []
+    for name in ('memory_max_mib', 'reserve_memory_mib', 'cpu_quota_percent'):
+        value = getattr(args, name)
+        if value is not None:
+            if value <= 0 or args.mode != 'create':
+                parser.error('Positive resource budgets are supported only for fresh creation')
+            resource_options += ['--' + name.replace('_', '-'), str(value)]
     if args.mode == 'migrate' and args.directory.rstrip('/') == args.legacy_directory.rstrip('/'):
         parser.error('Migration requires a separate destination directory')
     if Path(args.host).name != args.host or args.host in ('.', '..'):
@@ -261,7 +271,7 @@ def main():
         local=args.output_dir/args.host
         try:
             run(client, ['venv/bin/python', 'provision_server.py', 'create', '--count', str(args.target_count),
-                         '--project-prefix', args.project_prefix, *network], args.directory)
+                         '--project-prefix', args.project_prefix, *network, *resource_options], args.directory)
         finally:
             deployment = download_pool(sftp, args.directory, local)
         if deployment is None:
@@ -272,7 +282,8 @@ def main():
         failures = 0
         for project in deployment['projects']:
             result = subprocess.run([sys.executable, str(Path(__file__).with_name('4_proxy_checker.py')),
-                                     '--project-name', project, '--base-dir', str(local)])
+                                     '--project-name', project, '--base-dir', str(local),
+                                     '--concurrency', str(args.check_concurrency)])
             failures += result.returncode != 0
         try:
             run(client, ['venv/bin/python', 'provision_server.py', 'finalize',

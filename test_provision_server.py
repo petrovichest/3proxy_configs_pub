@@ -12,6 +12,34 @@ import remote_setup_script as remote
 
 
 class CreationTests(unittest.TestCase):
+    def test_resource_defaults_and_explicit_budget_reserve_host_memory(self):
+        with patch.object(provision, 'memory_info', return_value={'available_bytes': 64 * 1024**3}):
+            default = provision.creation_resources(argparse.Namespace())
+            self.assertEqual(default['memory_max_bytes'], 64 * 1024**3 - 512 * 1024**2)
+            self.assertNotIn('cpu_quota_percent', default)
+            args = argparse.Namespace(memory_max_mib=8192, reserve_memory_mib=32768, cpu_quota_percent=400)
+            self.assertEqual(provision.creation_resources(args), {
+                'memory_max_bytes': 8 * 1024**3,
+                'available_memory_reserve_bytes': 32 * 1024**3,
+                'cpu_quota_percent': 400})
+            args.memory_max_mib = 40000
+            with self.assertRaisesRegex(RuntimeError, 'reserve'):
+                provision.creation_resources(args)
+
+    def test_persisted_reserve_is_enforced_after_creation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = Path(temp) / 'deployment.json'
+            record.write_text(json.dumps({'resources': {'available_memory_reserve_bytes': 32 * 1024**3}}))
+            with patch.object(provision, 'RECORD', record), patch.object(provision, 'memory_info', return_value={'available_bytes': 31 * 1024**3}):
+                with self.assertRaisesRegex(RuntimeError, '32768 MiB'):
+                    provision.require_memory()
+
+    def test_invalid_resource_budgets_are_rejected(self):
+        for option in ('memory_max_mib', 'reserve_memory_mib', 'cpu_quota_percent'):
+            for value in (0, -1):
+                with self.subTest(option=option, value=value), self.assertRaises(ValueError):
+                    provision.creation_resources(argparse.Namespace(**{option: value}))
+
     def test_existing_pool_is_rejected_before_deployment_record_is_written(self):
         args = argparse.Namespace(count=3000, interface=None, external_ipv4=None, ipv6_subnet=None,
                                   project_prefix='capacity')

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 from collections import Counter
+import hashlib
 import ipaddress
 import json
 import math
@@ -71,7 +72,7 @@ def fixture_config():
     return json.loads((LAB / 'fixture.json').read_text())
 
 
-async def fixture():
+async def fixture(allowed_sources=None):
     if resource.getrlimit(resource.RLIMIT_NOFILE)[0] < 32768:
         raise RuntimeError('Fixture requires LimitNOFILE >= 32768')
     LAB.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -86,13 +87,18 @@ async def fixture():
     config_path = LAB / 'fixture.json'
     if not config_path.exists():
         config_path.write_text(json.dumps({'token': secrets.token_urlsafe(32),
-                                         'ipv6': FIXTURE_IPV6, 'ipv4': FIXTURE_IPV4}))
+                                         'ipv6': FIXTURE_IPV6, 'ipv4': FIXTURE_IPV4,
+                                         'allowed_sources': allowed_sources}))
         config_path.chmod(0o600)
     config = fixture_config()
+    if config['ipv6'] != FIXTURE_IPV6 or config['ipv4'] != FIXTURE_IPV4:
+        raise ValueError('Fixture addresses changed; use a new private lab directory')
+    if allowed_sources is not None and config.get('allowed_sources') != allowed_sources:
+        raise ValueError('Fixture allowlist changed; use a new private lab directory')
     payload = base64.b64encode(os.urandom(3072)).decode()
-    allowed = [ipaddress.ip_network(n) for n in (
+    allowed = [ipaddress.ip_network(n) for n in (config.get('allowed_sources') or (
         '2a0b:4140:965d::/48', FIXTURE_IPV6 + '/128', '213.165.33.195/32', FIXTURE_IPV4 + '/32',
-        '::1/128', '127.0.0.1/32')]
+        '::1/128', '127.0.0.1/32'))]
 
     @web.middleware
     async def authorize(request, handler):
@@ -266,20 +272,34 @@ class Workload:
                 self.counters['ws_reconnections'] += 1
 
     async def check(self):
-        semaphore = asyncio.Semaphore(20)
-        connector = aiohttp.TCPConnector(ssl=self.tls, force_close=True, limit=20)
+        concurrency = self.args.check_concurrency
+        connector = aiohttp.TCPConnector(ssl=self.tls, force_close=True, limit=concurrency)
         results = Counter()
+        positions = [Histogram() for _ in range(10)]
+        failures = []
+        started = time.monotonic()
+        pending = iter(enumerate(self.pool))
         async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
-            async def one(row):
-                async with semaphore:
+            async def worker():
+                for index, row in pending:
+                    begin = time.monotonic()
                     try:
                         async with session.get(self.https + '/ip', proxy=proxy_url(row),
                                                headers=self.headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
                             data = await r.json()
-                            results['passed' if r.status == 200 and same_ip(data.get('exit', ''), row['ipv6']) else 'failed'] += 1
-                    except Exception:
+                            good = r.status == 200 and same_ip(data.get('exit', ''), row['ipv6'])
+                            results['passed' if good else 'failed'] += 1
+                            if not good and len(failures) < 50:
+                                failures.append({'index': index, 'error': 'status_or_exit_mismatch'})
+                    except Exception as exc:
                         results['failed'] += 1
-            await asyncio.gather(*(one(r) for r in self.pool))
+                        if len(failures) < 50:
+                            failures.append({'index': index, 'error': type(exc).__name__})
+                    positions[min(9, index * 10 // len(self.pool))].add(time.monotonic() - begin)
+                    if (results['passed'] + results['failed']) % 1000 == 0:
+                        print(json.dumps({'checked': results['passed'] + results['failed'],
+                                          'passed': results['passed'], 'failed': results['failed']}), flush=True)
+            await asyncio.gather(*(worker() for _ in range(concurrency)))
             row = dict(self.pool[0], password='incorrect-' + secrets.token_hex(8))
             try:
                 async with session.get(self.http + '/ip', proxy=proxy_url(row), headers=self.headers,
@@ -309,9 +329,16 @@ class Workload:
                             results['reuse_passed' if r.status == 200 and same_ip(data.get('exit', ''), row['ipv6']) else 'reuse_failed'] += 1
                     except Exception:
                         results['reuse_failed'] += 1
-        print(json.dumps({'check': dict(results), 'count': len(self.pool)}), flush=True)
-        return int(bool(results['failed'] or results['reuse_failed'] or
-                        any(not results[k] for k in ('bad_password_rejected', 'ipv4_rejected', 'mapped_ipv4_rejected'))))
+        failed = bool(results['failed'] or results['reuse_failed'] or results['passed'] != len(self.pool) or
+                      any(not results[k] for k in ('bad_password_rejected', 'ipv4_rejected', 'mapped_ipv4_rejected')))
+        report = {'check': dict(results), 'count': len(self.pool), 'ok': not failed,
+                  'elapsed': time.monotonic() - started, 'failures': failures,
+                  'pool_sha256': hashlib.sha256(self.args.pool.read_bytes()).hexdigest(),
+                  'https_probe_ms_by_decile': [h.summary() for h in positions]}
+        if self.args.report:
+            self.args.report.write_text(json.dumps(report, indent=2) + '\n')
+        print(json.dumps(report), flush=True)
+        return int(failed)
 
     async def run(self):
         if resource.getrlimit(resource.RLIMIT_NOFILE)[0] < 32768:
@@ -373,10 +400,17 @@ class Workload:
 
 
 def main():
+    global LAB, FIXTURE_IPV4, FIXTURE_IPV6
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=('fixture', 'check', 'load'))
     parser.add_argument('--pool', type=Path)
+    parser.add_argument('--lab-dir', type=Path, default=LAB)
+    parser.add_argument('--fixture-ipv4', default=FIXTURE_IPV4)
+    parser.add_argument('--fixture-ipv6', default=FIXTURE_IPV6)
+    parser.add_argument('--allow-source', action='append')
+    parser.add_argument('--check-concurrency', type=int, default=20)
+    parser.add_argument('--report', type=Path)
     parser.add_argument('--rps', type=float, default=104)
     parser.add_argument('--ws', type=int, default=400)
     parser.add_argument('--http-pool', type=int, default=1000)
@@ -384,10 +418,17 @@ def main():
     parser.add_argument('--duration', type=float, default=180)
     parser.add_argument('--reconnect-at', type=float, default=0)
     args = parser.parse_args()
+    LAB = args.lab_dir
+    FIXTURE_IPV4 = str(ipaddress.IPv4Address(args.fixture_ipv4))
+    FIXTURE_IPV6 = str(ipaddress.IPv6Address(args.fixture_ipv6))
+    if args.check_concurrency <= 0:
+        parser.error('Positive check concurrency required')
+    if args.allow_source is not None:
+        args.allow_source = [str(ipaddress.ip_network(n, strict=True)) for n in args.allow_source]
     if args.rps < 0 or args.ws < 0 or args.http_pool < 0 or args.duration <= 0 or args.warmup < 0:
         parser.error('Invalid workload size or duration')
     if args.mode == 'fixture':
-        asyncio.run(fixture())
+        asyncio.run(fixture(args.allow_source))
         return
     if args.pool is None:
         parser.error('--pool is required')

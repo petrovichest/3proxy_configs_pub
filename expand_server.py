@@ -148,8 +148,12 @@ def prepare(target):
         provision.wait_ready([project])
         return previous or {'status': 'complete', 'target_count': target, 'project': project}
     memory = provision.require_memory()
-    if (target - len(rows)) * 2048 > memory['available_bytes'] - provision.RESERVE_BYTES:
+    resources = deployment.get('resources', {})
+    reserve = resources.get('available_memory_reserve_bytes', provision.RESERVE_BYTES)
+    if (target - len(rows)) * 2048 > memory['available_bytes'] - reserve:
         raise ValueError('Insufficient memory for the additional configuration')
+    if target * 2048 > resources.get('memory_max_bytes', memory['available_bytes'] - reserve):
+        raise ValueError('Expanded configuration exceeds the service memory budget')
     _, reserved = provision.generator().network_preflight(pool['interface'], pool['listen_ipv4'])
     if not {str(ipaddress.IPv6Interface(r['ipv6']).ip) for r in rows} <= set(reserved):
         raise ValueError('Existing pool addresses are missing from the interface')

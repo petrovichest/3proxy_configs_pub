@@ -27,11 +27,38 @@ def save(record):
     generator().atomic_write(RECORD, json.dumps(record, indent=2) + '\n')
 
 
-def require_memory():
+def resource_policy():
+    if RECORD.exists():
+        return json.loads(RECORD.read_text()).get('resources', {})
+    return {}
+
+
+def require_memory(reserve=None):
+    if reserve is None:
+        reserve = resource_policy().get('available_memory_reserve_bytes', RESERVE_BYTES)
     memory = memory_info()
-    if memory['available_bytes'] < RESERVE_BYTES:
-        raise RuntimeError('Less than 512 MiB RAM remains available; requested pool is incomplete')
+    if memory['available_bytes'] < reserve:
+        raise RuntimeError(f'Less than {reserve // 1024**2} MiB RAM remains available; requested pool is incomplete')
     return memory
+
+
+def creation_resources(args):
+    reserve_mib = getattr(args, 'reserve_memory_mib', 512)
+    memory_mib = getattr(args, 'memory_max_mib', None)
+    cpu_percent = getattr(args, 'cpu_quota_percent', None)
+    if reserve_mib <= 0 or (memory_mib is not None and memory_mib <= 0):
+        raise ValueError('Memory budgets must be positive')
+    if cpu_percent is not None and cpu_percent <= 0:
+        raise ValueError('CPU quota must be positive')
+    reserve = reserve_mib * 1024**2
+    available = require_memory(reserve)['available_bytes'] - reserve
+    budget = memory_mib * 1024**2 if memory_mib is not None else available
+    if budget > available:
+        raise RuntimeError('Requested memory budget would consume the host reserve')
+    result = {'memory_max_bytes': budget, 'available_memory_reserve_bytes': reserve}
+    if cpu_percent is not None:
+        result['cpu_quota_percent'] = cpu_percent
+    return result
 
 
 def wait_ready(projects, deadline=180):
@@ -65,16 +92,18 @@ def create(args):
         raise ValueError('A positive --count is required')
     module = generator()
     network = inspect(ROOT, interface=args.interface, ipv4=args.external_ipv4, subnet=args.ipv6_subnet)
-    memory = require_memory()
-    budget = memory['available_bytes'] - RESERVE_BYTES
+    resources = creation_resources(args)
+    budget = resources['memory_max_bytes']
     if args.count * 2048 > budget:
         raise RuntimeError('Insufficient RAM to construct the complete requested configuration')
     module.SERVICE_LIMITS['MemoryMax'] = budget
+    if 'cpu_quota_percent' in resources:
+        module.SERVICE_LIMITS['CPUQuota'] = str(resources['cpu_quota_percent']) + '%'
     ports, addresses = module.network_preflight(network['interface'], network['ipv4'])
     record = {'version': 1, 'status': 'creating', 'requested_count': args.count,
               'created_count': 0, 'projects': [], 'network': network,
               'architecture': '3proxy-shared-v1', 'identity': 'host_port_username',
-              'resources': {'memory_max_bytes': budget, 'available_memory_reserve_bytes': RESERVE_BYTES},
+              'resources': resources,
               'started_at': time.time(), 'code_revision': subprocess.check_output(
                   ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()}
     save(record)
@@ -144,6 +173,9 @@ def main():
     parser.add_argument('--interface')
     parser.add_argument('--external-ipv4')
     parser.add_argument('--ipv6-subnet')
+    parser.add_argument('--memory-max-mib', type=int)
+    parser.add_argument('--reserve-memory-mib', type=int, default=512)
+    parser.add_argument('--cpu-quota-percent', type=int)
     parser.add_argument('--verification', choices=('passed', 'failed'))
     args = parser.parse_args()
     if os.geteuid() != 0:

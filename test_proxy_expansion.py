@@ -92,6 +92,15 @@ class ExpansionTests(unittest.TestCase):
         self.assertEqual(hashes, {n: expansion.digest(self.directory/n) for n in expansion.FILES})
         self.assertEqual(expansion.read_pool(self.directory)[0][:2], self.rows)
 
+    def test_service_budget_blocks_growth_before_any_publication(self):
+        self.deployment['resources'] = {'memory_max_bytes': 4 * 2048,
+                                        'available_memory_reserve_bytes': 512 * 1024**2}
+        (self.root / 'deployment.json').write_text(json.dumps(self.deployment))
+        with self.assertRaisesRegex(ValueError, 'service memory budget'):
+            self.prepare(5)
+        self.assertEqual(self.before, {n: (self.directory/n).read_bytes() for n in expansion.FILES})
+        self.assertFalse((self.root / 'expansion.json').exists())
+
     def test_partial_publish_can_resume(self):
         record = self.prepare()
         state = self.root/record['state_directory']
