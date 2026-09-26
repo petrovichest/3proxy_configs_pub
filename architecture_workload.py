@@ -219,7 +219,8 @@ class Workload:
             if self.stopped:
                 break
             if len(self.live_requests) >= 1024:
-                self.counters['generator_backpressure'] += 1
+                self.counters['generator_backpressure' if self.measuring
+                              else 'warmup_generator_backpressure'] += 1
             else:
                 task = asyncio.create_task(self.request(session, pool[index % len(pool)]))
                 self.live_requests.add(task)
