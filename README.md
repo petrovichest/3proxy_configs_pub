@@ -97,6 +97,30 @@ venv/bin/python remote_setup_script.py --host 192.0.2.10 --target-count 3000 \
 На том же каталоге затем проверены [1000 HTTP/с + 400 WSS и 100 HTTP/с + 1000 WSS](docs/higher-load-results-2026-09-26.md).
 Это пройденные профили собственной контрольной цели, не квоты API или максимум сервера.
 
+### Память работающего proxy28
+
+Для `3proxy-shared.service` на proxy28 применяется
+[`ops/proxy28-memory.conf`](ops/proxy28-memory.conf): лимит **1280 МиБ** вместо
+первоначальных 684,4 МиБ. Прежний лимит приводил к регулярному `oom-kill` и обрыву
+соединений Llama/OKX. У этого хоста около 2 ГиБ RAM; большой запас RAM сервера
+приложений к нему не относится. Настройка предназначена только для proxy28.
+
+После доставки этой версии через Git применить на proxy28 из каталога репозитория:
+
+```bash
+install -d -m 755 /etc/systemd/system/3proxy-shared.service.d
+install -m 644 ops/proxy28-memory.conf /etc/systemd/system/3proxy-shared.service.d/50-memory-budget.conf
+systemctl daemon-reload
+systemctl show 3proxy-shared.service -p MainPID -p NRestarts -p MemoryMax -p MemoryCurrent
+cat /sys/fs/cgroup/system.slice/3proxy-shared.service/memory.max
+```
+
+Лимит применяется к работающей службе без перезапуска; ожидаемое значение —
+`1342177280` байт. Проверить сохранение PID, отсутствие новых OOM/перезапусков,
+доступную RAM, swap и свежесть котировок под обычной нагрузкой. Drop-in сохраняется
+после перезагрузки; исходный unit и исторический бюджет в `deployment.json`
+остаются прежними. Для текущего лимита использовать `systemctl show` и cgroup.
+
 ### Результат и ошибки
 
 Локально в `downloaded_configs/<host>/` сохраняются:
