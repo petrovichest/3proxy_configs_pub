@@ -22,7 +22,7 @@ def render(project, interface, root):
     return {
         f'{unit}.service.d/50-recovery.conf':
             '[Unit]\nStartLimitIntervalSec=0\n\n'
-            '[Service]\nRestart=always\nRestartSec=1s\n',
+            '[Service]\nRestart=always\nRestartSec=1s\nTimeoutStopSec=5s\n',
         f'{repair}.service':
             f'[Unit]\nDescription=Restore missing IPv6 for {project}\n'
             'After=network-online.target\n\n[Service]\nType=oneshot\n'
