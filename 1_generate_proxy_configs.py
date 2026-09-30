@@ -170,6 +170,7 @@ def render_project(directory, project, records, interface, *, shared=False):
         'proxy_checker.sh': f'exec "{root}/venv/bin/python" "{root}/4_proxy_checker.py" --project-name {project} "$@"',
         'start_systemctl.sh': (f'python3 "{root}/setup_proxy_logging.py" "{final}/full_proxy_config"\n'
             f'install -m 644 "{final}/service.unit" /etc/systemd/system/3proxy-{project}.service\n'
+            f'"{root}/venv/bin/python" "{root}/install_resilience.py" {project} --interface {interface}\n'
             f'systemctl daemon-reload\nsystemctl enable --now 3proxy-{project}.service\n'
             f'systemctl is-active --quiet 3proxy-{project}.service'),
         'stop_systemctl.sh': (f'systemctl disable --now 3proxy-{project}.service\n'

@@ -29,15 +29,15 @@ def current_addresses(interface):
     return {str(ipaddress.IPv6Address(a['local'])):a for link in data for a in link['addr_info']}
 
 
-def bind_addresses(addresses, interface, action):
+def bind_addresses(addresses, interface, action, *, quiet=False):
     existing = current_addresses(interface)
     selected = [a for a in addresses if (str(a.ip) not in existing if action == 'add' else str(a.ip) in existing)]
     if selected:
         batch = ''.join(f'addr {action} {a} dev {interface}' + (' noprefixroute' if action == 'add' else '') + '\n' for a in selected)
         subprocess.run(['ip','-6','-batch','-'],input=batch,text=True,check=True)
     deadline = time.monotonic()+15
+    actual = current_addresses(interface) if selected else existing
     while True:
-        actual = current_addresses(interface)
         if action == 'del':
             if any(str(a.ip) in actual for a in addresses):
                 raise RuntimeError('IPv6 deletion incomplete')
@@ -50,7 +50,9 @@ def bind_addresses(addresses, interface, action):
         if time.monotonic() >= deadline:
             raise RuntimeError('IPv6 binding incomplete or still tentative')
         time.sleep(.2)
-    print(f'IPv6 {action}: {len(selected)} changed, {len(addresses)} verified')
+        actual = current_addresses(interface)
+    if selected or not quiet:
+        print(f'IPv6 {action}: {len(selected)} changed, {len(addresses)} verified')
 
 
 def main():
@@ -60,6 +62,7 @@ def main():
     parser.add_argument('--action',choices=['add','add_all','del','del_all'],default='add')
     parser.add_argument('--ipv6',help='Select one address from this project')
     parser.add_argument('--prefixlen',type=int,help='Verify the selected address prefix length')
+    parser.add_argument('--quiet',action='store_true',help='Only report changed addresses')
     args=parser.parse_args()
     if not all(c.isalnum() or c in '_.:-' for c in args.interface):
         parser.error('Invalid interface')
@@ -74,7 +77,7 @@ def main():
             parser.error('IPv6 address does not belong to this project')
     if args.prefixlen is not None and any(address.network.prefixlen!=args.prefixlen for address in addresses):
         parser.error('Prefix length differs from the generated configuration')
-    bind_addresses(addresses,args.interface,'add' if args.action.startswith('add') else 'del')
+    bind_addresses(addresses,args.interface,'add' if args.action.startswith('add') else 'del',quiet=args.quiet)
 
 
 if __name__=='__main__':

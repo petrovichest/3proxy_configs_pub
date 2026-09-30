@@ -184,7 +184,7 @@ class BindingTests(unittest.TestCase):
               '--ipv6','2001:db8::4','--prefixlen','64']
         with patch('sys.argv',args),patch.object(bind,'extract_ipv6_addresses',return_value=addresses),patch.object(bind,'bind_addresses') as apply:
             bind.main()
-            apply.assert_called_once_with([addresses[1]],'net0','del')
+            apply.assert_called_once_with([addresses[1]],'net0','del',quiet=False)
 
     def test_specific_address_cli_rejects_unrelated_primary_address(self):
         args=['2_bind_ipv6_addresses.py','test','--interface','net0','--action','del','--ipv6','2001:db8::2']
