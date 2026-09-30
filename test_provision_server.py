@@ -55,6 +55,21 @@ class CreationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'incomplete'):
                 provision.require_memory()
 
+    def test_failed_external_verification_can_be_rechecked_without_recreating_pool(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = Path(temp) / 'deployment.json'
+            original = {'status': 'verification_failed', 'projects': ['capacity'],
+                        'requested_count': 5000, 'created_count': 5000}
+            record.write_text(json.dumps(original))
+            with (patch.object(provision, 'RECORD', record),
+                  patch.object(provision, 'wait_ready') as ready,
+                  patch.object(provision, 'save') as save,
+                  contextlib.redirect_stdout(io.StringIO())):
+                provision.finalize('passed')
+            ready.assert_called_once_with(['capacity'])
+            self.assertEqual(save.call_args.args[0]['status'], 'complete')
+            self.assertEqual(save.call_args.args[0]['external_verification'], 'passed')
+
     def test_incomplete_count_cannot_be_finalized(self):
         with tempfile.TemporaryDirectory() as temp:
             record = Path(temp) / 'deployment.json'

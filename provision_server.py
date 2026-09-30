@@ -145,7 +145,7 @@ def create(args):
 
 def finalize(verification):
     record = json.loads(RECORD.read_text())
-    if record['status'] != 'started_unverified':
+    if record['status'] not in ('started_unverified', 'verification_failed'):
         raise ValueError('Only a newly started, unverified pool can be finalized')
     if verification == 'passed':
         try:
