@@ -344,7 +344,8 @@ class Workload:
     async def run(self):
         if resource.getrlimit(resource.RLIMIT_NOFILE)[0] < 32768:
             raise RuntimeError('Load generator requires LimitNOFILE >= 32768')
-        connector = aiohttp.TCPConnector(ssl=self.tls, limit=0, keepalive_timeout=1800)
+        connector = aiohttp.TCPConnector(ssl=self.tls, limit=self.args.client_connection_limit,
+                                         keepalive_timeout=1800)
         async with aiohttp.ClientSession(connector=connector, trust_env=False) as session:
             semaphore = asyncio.Semaphore(30)
             ws_pool = uniform_pool(self.pool, self.args.ws)
@@ -380,6 +381,7 @@ class Workload:
                 result['final'] = True
                 result['configuration'] = {'count': len(self.pool), 'http_pool': self.args.http_pool or len(self.pool),
                                            'rps': self.args.rps, 'ws': self.args.ws,
+                                           'client_connection_limit': self.args.client_connection_limit,
                                            'warmup': self.args.warmup, 'duration': self.args.duration,
                                            'reconnect_at': self.args.reconnect_at}
                 print(json.dumps(result), flush=True)
@@ -415,6 +417,8 @@ def main():
     parser.add_argument('--rps', type=float, default=104)
     parser.add_argument('--ws', type=int, default=400)
     parser.add_argument('--http-pool', type=int, default=1000)
+    parser.add_argument('--client-connection-limit', type=int, default=0,
+                        help='Bound load-generator connections; zero keeps the existing unlimited mode')
     parser.add_argument('--warmup', type=float, default=60)
     parser.add_argument('--duration', type=float, default=180)
     parser.add_argument('--reconnect-at', type=float, default=0)
@@ -426,7 +430,8 @@ def main():
         parser.error('Positive check concurrency required')
     if args.allow_source is not None:
         args.allow_source = [str(ipaddress.ip_network(n, strict=True)) for n in args.allow_source]
-    if args.rps < 0 or args.ws < 0 or args.http_pool < 0 or args.duration <= 0 or args.warmup < 0:
+    if (args.rps < 0 or args.ws < 0 or args.http_pool < 0 or args.client_connection_limit < 0
+            or args.duration <= 0 or args.warmup < 0):
         parser.error('Invalid workload size or duration')
     if args.mode == 'fixture':
         asyncio.run(fixture(args.allow_source))
